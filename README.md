@@ -64,5 +64,5 @@ docker compose up -d
 ## Docker Hub
 
 ```bash
-docker pull samuelstreets/connectwise-pulse:latest
+docker pull samuelstreets/connectwise-anaytics:latest
 ```
