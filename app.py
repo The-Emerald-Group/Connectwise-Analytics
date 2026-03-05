@@ -2,6 +2,7 @@ import os
 import requests
 import base64
 import urllib3
+import traceback
 from flask import Flask, jsonify, render_template, request
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
@@ -69,7 +70,6 @@ def get_members_map():
     global MEMBER_MAP_CACHE, MEMBER_MAP_LAST_FETCH
     now = datetime.now(timezone.utc)
     
-    # Refresh cache every 1 hour
     if MEMBER_MAP_LAST_FETCH and (now - MEMBER_MAP_LAST_FETCH).total_seconds() < 3600:
         return MEMBER_MAP_CACHE
         
@@ -119,18 +119,23 @@ def ticket_stats():
         since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
         m_map = get_members_map()
 
+        # Removed "fields" filter so CW returns the full object including _info
         created_tickets = cw_get("/service/tickets", {
             "conditions": f"dateEntered >= [{since_str}] and parentTicketId = null",
-            "fields": "id,summary,owner,board,dateEntered,enteredBy",
             "orderBy": "dateEntered asc"
         })
 
-        # Fetches Completed/Resolved tickets instead of just Closed
-        completed_tickets = cw_get("/service/tickets", {
-            "conditions": f"(closedFlag = true or status/resolvedFlag = true or status/name = 'Completed') and lastUpdated >= [{since_str}] and parentTicketId = null",
-            "fields": "id,summary,owner,board,lastUpdated,closedDate,closedBy,dateResolved,resolvedBy,status",
+        recently_updated = cw_get("/service/tickets", {
+            "conditions": f"lastUpdated >= [{since_str}] and parentTicketId = null",
             "orderBy": "lastUpdated asc"
         })
+
+        completed_tickets = []
+        for t in recently_updated:
+            st = t.get("status", {})
+            st_name = st.get("name", "").lower()
+            if t.get("closedFlag") or st_name in ["completed", "resolved"]:
+                completed_tickets.append(t)
 
         daily_buckets = {}
         for i in range(days):
@@ -139,29 +144,35 @@ def ticket_stats():
 
         def day_key(iso):
             try:
+                if not iso: return None
                 return datetime.fromisoformat(iso.replace("Z", "+00:00")).strftime("%d %b")
-            except:
+            except Exception:
                 return None
 
         for t in created_tickets:
-            k = day_key(t.get("dateEntered", ""))
+            info = t.get("_info", {})
+            dt = t.get("dateEntered") or info.get("dateEntered")
+            k = day_key(dt)
             if k and k in daily_buckets:
                 daily_buckets[k]["created"] += 1
 
         for t in completed_tickets:
-            # Prioritize resolution date over close date
-            ts = t.get("dateResolved") or t.get("closedDate") or t.get("lastUpdated", "")
-            k = day_key(ts)
+            info = t.get("_info", {})
+            dt = t.get("dateResolved") or t.get("closedDate") or info.get("lastUpdated") or t.get("lastUpdated")
+            k = day_key(dt)
             if k and k in daily_buckets:
                 daily_buckets[k]["completed"] += 1
 
         def get_creator(t):
-            eb = t.get("enteredBy")
-            return get_real_name(eb, t.get("owner"), m_map)
+            info = t.get("_info", {})
+            eb = t.get("enteredBy") or info.get("enteredBy")
+            return get_real_name(eb, t.get("owner"), m_map), eb
 
         def get_completer(t):
-            cb = t.get("resolvedBy") or t.get("closedBy")
-            return get_real_name(cb, t.get("owner"), m_map)
+            info = t.get("_info", {})
+            # Fallback chain: closedBy -> updatedBy in _info -> owner
+            cb = t.get("closedBy") or info.get("closedBy") or info.get("updatedBy")
+            return get_real_name(cb, t.get("owner"), m_map), cb
 
         def get_board(t):
             b = t.get("board")
@@ -172,20 +183,21 @@ def ticket_stats():
         user_completed  = defaultdict(list)
         
         for t in created_tickets:
-            user = get_creator(t)
-            eb = t.get("enteredBy", "")
-            if user.lower() not in CW_IGNORE_USERS and eb.lower() not in CW_IGNORE_USERS:
-                user_created[user].append(get_board(t))
+            user_real, user_raw = get_creator(t)
+            user_raw = user_raw or ""
+            if user_real.lower() not in CW_IGNORE_USERS and user_raw.lower() not in CW_IGNORE_USERS:
+                user_created[user_real].append(get_board(t))
                 
         for t in completed_tickets:
-            user = get_completer(t)
-            cb = t.get("resolvedBy") or t.get("closedBy") or ""
-            if user.lower() not in CW_IGNORE_USERS and cb.lower() not in CW_IGNORE_USERS:
-                user_completed[user].append(get_board(t))
+            user_real, user_raw = get_completer(t)
+            user_raw = user_raw or ""
+            if user_real.lower() not in CW_IGNORE_USERS and user_raw.lower() not in CW_IGNORE_USERS:
+                user_completed[user_real].append(get_board(t))
 
         all_users = set(user_created.keys()) | set(user_completed.keys())
         users_result = []
         for name in sorted(all_users):
+            if name.lower() in ["unassigned", ""]: continue
             cb = user_created[name]; xb = user_completed[name]
             bn = set(cb) | set(xb)
             boards = [{"name": b, "created": cb.count(b), "completed": xb.count(b)} for b in sorted(bn) if b]
@@ -216,6 +228,8 @@ def ticket_stats():
         })
 
     except Exception as e:
+        print(f"--- API ERROR IN TICKET STATS ---")
+        print(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/customer-stats")
@@ -229,21 +243,31 @@ def customer_stats():
 
         created_tickets = cw_get("/service/tickets", {
             "conditions": f"dateEntered >= [{since_str}] and parentTicketId = null",
-            "fields": "id,company,contact,owner,board,dateEntered,enteredBy",
             "orderBy": "dateEntered asc"
         })
 
-        completed_tickets = cw_get("/service/tickets", {
-            "conditions": f"(closedFlag = true or status/resolvedFlag = true or status/name = 'Completed') and lastUpdated >= [{since_str}] and parentTicketId = null",
-            "fields": "id,company,contact,owner,board,lastUpdated,closedDate,closedBy,dateResolved,resolvedBy,status",
+        recently_updated = cw_get("/service/tickets", {
+            "conditions": f"lastUpdated >= [{since_str}] and parentTicketId = null",
             "orderBy": "lastUpdated asc"
         })
 
-        # Open Tickets EXCLUDING things sitting in "Completed" statuses waiting for billing
-        open_tickets = cw_get("/service/tickets", {
-            "conditions": "closedFlag = false and status/resolvedFlag = false and status/name != 'Completed' and parentTicketId = null",
-            "fields": "id,company,owner,board,priority,dateEntered",
+        completed_tickets = []
+        for t in recently_updated:
+            st = t.get("status", {})
+            st_name = st.get("name", "").lower()
+            if t.get("closedFlag") or st_name in ["completed", "resolved"]:
+                completed_tickets.append(t)
+
+        all_open_raw = cw_get("/service/tickets", {
+            "conditions": "closedFlag = false and parentTicketId = null",
         })
+
+        open_tickets = []
+        for t in all_open_raw:
+            st = t.get("status", {})
+            st_name = st.get("name", "").lower()
+            if st_name not in ["completed", "resolved"]:
+                open_tickets.append(t)
 
         def get_company(t):
             c = t.get("company")
@@ -251,12 +275,14 @@ def customer_stats():
             return c or "Unknown"
 
         def get_creator(t):
-            eb = t.get("enteredBy")
-            return get_real_name(eb, t.get("owner"), m_map)
+            info = t.get("_info", {})
+            eb = t.get("enteredBy") or info.get("enteredBy")
+            return get_real_name(eb, t.get("owner"), m_map), eb
 
         def get_completer(t):
-            cb = t.get("resolvedBy") or t.get("closedBy")
-            return get_real_name(cb, t.get("owner"), m_map)
+            info = t.get("_info", {})
+            cb = t.get("closedBy") or info.get("closedBy") or info.get("updatedBy")
+            return get_real_name(cb, t.get("owner"), m_map), cb
 
         def get_board(t):
             b = t.get("board")
@@ -270,8 +296,9 @@ def customer_stats():
 
         def day_key(iso):
             try:
+                if not iso: return None
                 return datetime.fromisoformat(iso.replace("Z", "+00:00")).strftime("%d %b")
-            except:
+            except Exception:
                 return None
 
         daily_buckets = {}
@@ -280,15 +307,18 @@ def customer_stats():
             daily_buckets[day] = {"date": day, "created": 0, "completed": 0, "byCompany": {}}
 
         for t in created_tickets:
-            k = day_key(t.get("dateEntered", ""))
+            info = t.get("_info", {})
+            dt = t.get("dateEntered") or info.get("dateEntered")
+            k = day_key(dt)
             co = get_company(t)
             if k and k in daily_buckets:
                 daily_buckets[k]["created"] += 1
                 daily_buckets[k]["byCompany"][co] = daily_buckets[k]["byCompany"].get(co, 0) + 1
 
         for t in completed_tickets:
-            ts = t.get("dateResolved") or t.get("closedDate") or t.get("lastUpdated", "")
-            k = day_key(ts)
+            info = t.get("_info", {})
+            dt = t.get("dateResolved") or t.get("closedDate") or info.get("lastUpdated") or t.get("lastUpdated")
+            k = day_key(dt)
             if k and k in daily_buckets:
                 daily_buckets[k]["completed"] += 1
 
@@ -305,10 +335,10 @@ def customer_stats():
             co_created[co] += 1
             ct = get_contact(t)
             if ct: co_contacts[co].add(ct)
-            user = get_creator(t)
-            eb = t.get("enteredBy", "")
-            if user.lower() not in CW_IGNORE_USERS and eb.lower() not in CW_IGNORE_USERS:
-                co_techs_c[co][user] += 1
+            user_real, user_raw = get_creator(t)
+            user_raw = user_raw or ""
+            if user_real.lower() not in CW_IGNORE_USERS and user_raw.lower() not in CW_IGNORE_USERS:
+                co_techs_c[co][user_real] += 1
             bn = get_board(t)
             if bn: co_boards_c[co][bn] += 1
 
@@ -317,10 +347,10 @@ def customer_stats():
             co_completed[co] += 1
             ct = get_contact(t)
             if ct: co_contacts[co].add(ct)
-            user = get_completer(t)
-            cb = t.get("resolvedBy") or t.get("closedBy") or ""
-            if user.lower() not in CW_IGNORE_USERS and cb.lower() not in CW_IGNORE_USERS:
-                co_techs_comp[co][user] += 1
+            user_real, user_raw = get_completer(t)
+            user_raw = user_raw or ""
+            if user_real.lower() not in CW_IGNORE_USERS and user_raw.lower() not in CW_IGNORE_USERS:
+                co_techs_comp[co][user_real] += 1
             bn = get_board(t)
             if bn: co_boards_comp[co][bn] += 1
 
@@ -336,7 +366,7 @@ def customer_stats():
         companies_result = []
         for co in all_cos:
             all_techs = set(co_techs_c[co].keys()) | set(co_techs_comp[co].keys())
-            techs = [{"name": t, "created": co_techs_c[co].get(t,0), "completed": co_techs_comp[co].get(t,0)} for t in all_techs]
+            techs = [{"name": t, "created": co_techs_c[co].get(t,0), "completed": co_techs_comp[co].get(t,0)} for t in all_techs if t.lower() not in ["unassigned", ""]]
             techs.sort(key=lambda x: x["created"]+x["completed"], reverse=True)
 
             all_boards = set(co_boards_c[co].keys()) | set(co_boards_comp[co].keys())
@@ -369,6 +399,8 @@ def customer_stats():
         })
 
     except Exception as e:
+        print(f"--- API ERROR IN CUSTOMER STATS ---")
+        print(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/config-check")
