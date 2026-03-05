@@ -1,0 +1,866 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ConnectWise Analytics</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+:root {
+  --bg:       #0a0a0a;
+  --surface:  #0a0a0a;
+  --panel:    #161616;
+  --raised:   #222222;
+  --border:   #222222;
+  --border2:  #333333;
+  --accent:   #00A1E4;
+  --accent2:  #4cd964;
+  --amber:    #ffcc00;
+  --red:      #ff3b30;
+  --green:    #4cd964;
+  --blue:     #00A1E4;
+  --purple:   #b06ef5;
+  --orange:   #f5934b;
+  --text:     white;
+  --text-dim: #888888;
+  --text-mid: #aaaaaa;
+  --font-display: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  --font-body: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  --font-mono: Consolas, 'Courier New', monospace;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+html { scroll-behavior:smooth; }
+body { background:var(--bg); color:var(--text); font-family:var(--font-body); font-size:14px; min-height:100vh; overflow-x:hidden; padding: 20px; }
+
+/* ── HEADER ── */
+.header-container { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+.header-title { margin:0; color:#444; letter-spacing:3px; font-size: 1.5rem; text-transform: uppercase; font-weight: bold; }
+.header-controls { display: flex; align-items: center; gap: 20px; }
+
+.clock-box { text-align: right; }
+.harvest-time { font-size: 1.2rem; font-weight: bold; color: var(--accent); }
+.harvest-label { font-size: 0.7rem; color: #666; text-transform: uppercase; letter-spacing: 1px; }
+
+/* ── PAGE NAV ── */
+.page-nav { display:flex; align-items:center; gap:0; background:var(--panel); border:1px solid var(--border2); border-radius:8px; overflow:hidden; }
+.page-btn { font-family:var(--font-body); font-size:0.8rem; font-weight:600; padding:8px 16px; cursor:pointer; border:none; background:transparent; color:var(--text-dim); transition:all .15s; letter-spacing:0.5px; display:flex; align-items:center; gap:6px; }
+.page-btn.active { background:var(--accent); color:white; }
+.page-btn:hover:not(.active) { color:var(--text); background:var(--raised); }
+.page-btn .page-icon { font-size:.85rem; }
+
+.days-selector { display:flex; align-items:center; gap:0; background:var(--panel); border:1px solid var(--border2); border-radius:8px; overflow:hidden; }
+.days-btn { font-family:var(--font-body); font-size:0.8rem; font-weight:600; padding:8px 14px; cursor:pointer; border:none; background:transparent; color:var(--text-dim); transition:all .15s; letter-spacing:0.5px; }
+.days-btn.active { background:var(--accent); color:white; }
+.days-btn:hover:not(.active) { color:var(--text); background:var(--raised); }
+
+/* ── LAYOUT ── */
+.app-body { position:relative; z-index:1; width: 100%; }
+.page { display:none; }
+.page.active { display:block; animation:fadeIn .25s ease; }
+
+/* ── CONFIG BANNER ── */
+.config-banner { display:none; align-items:center; gap:14px; background:rgba(245,91,91,0.07); border:1px solid rgba(245,91,91,0.2); border-radius:10px; padding:14px 18px; margin-bottom:24px; border-left: 10px solid var(--red); }
+.config-banner.show { display:flex; }
+.config-banner h4 { color:var(--red); font-size:.85rem; margin-bottom:3px; }
+.config-banner p { font-size:.8rem; color:var(--text-dim); }
+.config-banner code { background:rgba(255,255,255,.06); padding:2px 6px; border-radius:4px; color:var(--amber); font-family:var(--font-mono); }
+
+/* ── SECTION ── */
+.section { margin-bottom:36px; }
+.section-label { font-family:var(--font-body); font-size:0.75rem; font-weight:600; text-transform:uppercase; letter-spacing:3px; color:var(--text-dim); margin-bottom:14px; display:flex; align-items:center; gap:10px; }
+.section-label::after { content:''; flex:1; height:1px; background:var(--border); }
+
+/* ── KPI CARDS ── */
+.kpi-row { display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:20px; }
+.kpi { background:var(--panel); border-radius:12px; padding:20px 22px; position:relative; overflow:hidden; cursor:default; transition: transform .2s; border-left: 10px solid var(--kpi-color, var(--accent)); }
+.kpi:hover { transform:translateY(-1px); }
+.kpi-icon { font-size:1.4rem; margin-bottom:10px; opacity:0.8; }
+.kpi-num { font-size:2.4rem; font-weight:bold; line-height:1; color:var(--kpi-color, var(--text)); transition:opacity .3s; }
+.kpi-label-text { font-size:.7rem; color:var(--text-dim); text-transform:uppercase; letter-spacing:1.5px; margin-top:8px; font-weight: 600; }
+.kpi-sub-text { font-family:var(--font-mono); font-size:.7rem; color:var(--text-dim); margin-top:4px; }
+.kpi.loading .kpi-num { opacity:0.2; }
+
+/* ── GRID LAYOUTS ── */
+.two-col { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+.three-col { display:grid; grid-template-columns:2fr 1fr 1fr; gap:20px; }
+@media (max-width:1100px) { .three-col { grid-template-columns:1fr; } .two-col { grid-template-columns:1fr; } }
+
+/* ── CHART PANEL ── */
+.chart-panel { background:var(--panel); border-radius:12px; padding:22px 24px; border-left: 10px solid #2a2a2a; }
+.chart-panel-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:18px; }
+.chart-panel-title { font-size:1rem; font-weight:bold; }
+.chart-panel-badge { font-family:var(--font-mono); font-size:.7rem; padding:3px 9px; border-radius:4px; background:var(--raised); color:var(--text-dim); }
+.chart-wrap canvas { max-height:240px; }
+.chart-wrap.tall canvas { max-height:300px; }
+
+/* ── LEADERBOARD ── */
+.leaderboard { background:var(--panel); border-radius:12px; overflow:hidden; border-left: 10px solid #2a2a2a; }
+.lb-header { padding:16px 20px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; }
+.lb-title { font-size:1rem; font-weight:bold; }
+.lb-tabs { display:flex; gap:5px; }
+.lb-tab { font-family:var(--font-body); font-weight: 600; font-size:.7rem; padding:6px 12px; border-radius:6px; cursor:pointer; color:var(--text-dim); transition:all .15s; border:none; background:var(--raised); }
+.lb-tab.active { background:var(--accent); color:white; }
+.lb-tab:hover:not(.active) { color:var(--text); background:#333; }
+.lb-row { display:grid; grid-template-columns:28px 1fr 70px 70px 70px; align-items:center; gap:12px; padding:11px 20px; border-bottom:1px solid var(--border); transition:background .15s; }
+.lb-row:last-child { border-bottom:none; }
+.lb-row:hover { background:var(--raised); }
+.lb-rank { font-family:var(--font-mono); font-size:.8rem; color:var(--text-dim); text-align:center; }
+.lb-rank.gold { color:var(--amber); }
+.lb-rank.silver { color:#a0aec0; }
+.lb-rank.bronze { color:#cd7f32; }
+.lb-name { font-size:.9rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.lb-bar-wrap { position:relative; height:4px; background:var(--border2); border-radius:2px; margin-top:5px; }
+.lb-bar { height:4px; border-radius:2px; background:var(--accent); transition:width .6s ease; }
+.lb-val { font-family:var(--font-mono); font-size:.8rem; text-align:right; font-weight: 600; }
+.lb-val.created { color:var(--blue); }
+.lb-val.closed { color:var(--green); }
+.lb-val.net.pos { color:var(--red); }
+.lb-val.net.neg { color:var(--green); }
+.lb-val.net.zero { color:var(--text-dim); }
+
+/* ── DATA TABLE ── */
+.data-table { width:100%; border-collapse:collapse; }
+.data-table th { font-family:var(--font-body); font-size:.7rem; text-transform:uppercase; letter-spacing:1.5px; color:var(--text-dim); padding:10px 16px; border-bottom:1px solid var(--border); text-align:left; font-weight:bold; }
+.data-table th.r { text-align:right; }
+.data-table td { padding:12px 16px; border-bottom:1px solid var(--border); font-size:.85rem; font-weight: 500; }
+.data-table tr:last-child td { border-bottom:none; }
+.data-table tr:hover td { background:var(--raised); }
+.data-table td.r { text-align:right; font-family:var(--font-mono); }
+.data-table td.clickable { cursor:pointer; }
+.data-table td.clickable:hover { color:var(--accent); }
+
+.badge-c { display:inline-block; background:rgba(0, 161, 228, 0.15); color:var(--blue); border-radius:4px; padding:2px 8px; font-family:var(--font-mono); font-size:.75rem; }
+.badge-x { display:inline-block; background:rgba(76, 217, 100, 0.15); color:var(--green); border-radius:4px; padding:2px 8px; font-family:var(--font-mono); font-size:.75rem; }
+.badge-n-pos { display:inline-block; background:rgba(255, 59, 48, 0.15); color:var(--red); border-radius:4px; padding:2px 8px; font-family:var(--font-mono); font-size:.75rem; }
+.badge-n-neg { display:inline-block; background:rgba(76, 217, 100, 0.15); color:var(--green); border-radius:4px; padding:2px 8px; font-family:var(--font-mono); font-size:.75rem; }
+.badge-n-zero { display:inline-block; background:rgba(255,255,255,0.05); color:var(--text-dim); border-radius:4px; padding:2px 8px; font-family:var(--font-mono); font-size:.75rem; }
+
+/* ── SEARCH BAR ── */
+.search-bar { display:flex; align-items:center; gap:10px; background:var(--raised); border:1px solid var(--border2); border-radius:8px; padding:10px 14px; margin-bottom:16px; }
+.search-bar input { background:none; border:none; outline:none; color:var(--text); font-family:var(--font-body); font-size:.85rem; flex:1; }
+.search-bar input::placeholder { color:var(--text-dim); }
+.search-icon { color:var(--text-dim); font-size:1rem; }
+
+/* ── MODAL ── */
+.modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.85); backdrop-filter:blur(8px); z-index:500; align-items:center; justify-content:center; }
+.modal-overlay.open { display:flex; }
+.modal { background:var(--panel); border:1px solid var(--border2); border-radius:12px; width:min(720px, 95vw); max-height:87vh; overflow-y:auto; animation:modalIn .2s ease; border-left: 10px solid var(--accent); }
+@keyframes modalIn { from{opacity:0;transform:scale(.95)} to{opacity:1;transform:scale(1)} }
+.modal-header { padding:22px 26px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; background:var(--panel); z-index:1; }
+.modal-title { font-size:1.3rem; font-weight:bold; }
+.modal-subtitle { font-family:var(--font-mono); font-size:.75rem; color:var(--text-dim); margin-top:5px; }
+.modal-close { background:var(--raised); border:none; color:var(--text); cursor:pointer; font-size:1.2rem; padding:4px 10px; border-radius:6px; transition: background .15s; }
+.modal-close:hover { background:#333; }
+.modal-body { padding:24px 26px; }
+.modal-kpis { display:grid; grid-template-columns:repeat(4, 1fr); gap:15px; margin-bottom:20px; }
+.modal-kpi { background:var(--raised); border-radius:8px; padding:16px; text-align:center; }
+.modal-kpi-val { font-size:1.8rem; font-weight:bold; line-height:1; }
+.modal-kpi-lbl { font-size:.7rem; text-transform:uppercase; letter-spacing:1.5px; color:var(--text-dim); margin-top:6px; font-weight: 600;}
+.modal-section-title { font-family:var(--font-body); font-weight: bold; font-size:.8rem; text-transform:uppercase; letter-spacing:2px; color:var(--text-dim); margin-bottom:12px; margin-top:24px; border-bottom: 1px solid var(--border); padding-bottom: 5px; }
+
+/* ── PROGRESS BAR ── */
+.progress-row { margin-bottom:12px; }
+.progress-label { display:flex; justify-content:space-between; font-size:.85rem; margin-bottom:6px; font-weight: 500; }
+.progress-track { height:6px; background:var(--raised); border-radius:3px; overflow:hidden; }
+.progress-fill { height:100%; border-radius:3px; transition:width .6s ease; }
+
+/* ── LOADING ── */
+.loading-state { display:flex; align-items:center; justify-content:center; gap:10px; padding:50px; color:var(--text-dim); font-size:.9rem; font-family:var(--font-mono); }
+.spin { width:18px; height:18px; border:3px solid var(--border); border-top-color:var(--accent2); border-radius:50%; animation:spin .7s linear infinite; flex-shrink:0; }
+@keyframes spin { to { transform:rotate(360deg); } }
+
+/* ── ANIMATIONS ── */
+@keyframes fadeIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
+</style>
+</head>
+<body>
+
+<div class="header-container">
+  <h1 class="header-title">CONNECTWISE ANALYTICS</h1>
+  <div class="header-controls">
+    <nav class="page-nav">
+      <button class="page-btn active" data-page="technicians"><span class="page-icon">👤</span> Technicians</button>
+      <button class="page-btn" data-page="customers"><span class="page-icon">🏢</span> Customers</button>
+    </nav>
+    <div class="days-selector" id="days-selector">
+      <button class="days-btn" data-days="1">1D</button>
+      <button class="days-btn" data-days="7">7D</button>
+      <button class="days-btn" data-days="14">14D</button>
+      <button class="days-btn" data-days="30">30D</button>
+      <button class="days-btn" data-days="90">90D</button>
+    </div>
+    <div class="clock-box">
+      <div id="status-text" class="harvest-time">--:--:--</div>
+      <div class="harvest-label">Last API Harvest</div>
+    </div>
+  </div>
+</div>
+
+<div class="app-body">
+  <div class="config-banner" id="config-banner">
+    <div style="font-size:1.4rem">⚠️</div>
+    <div>
+      <h4>ConnectWise API not configured</h4>
+      <p>Set <code>CW_COMPANY</code>, <code>CW_PUBLIC_KEY</code>, <code>CW_PRIVATE_KEY</code>, <code>CW_CLIENT_ID</code> in your environment.</p>
+    </div>
+  </div>
+
+  <div class="page active" id="page-technicians">
+
+    <div class="section">
+      <div class="section-label">Overview</div>
+      <div class="kpi-row">
+        <div class="kpi loading" style="--kpi-color:var(--blue)"><div class="kpi-icon">📥</div><div class="kpi-num" id="kpi-created">—</div><div class="kpi-label-text">Tickets Created</div><div class="kpi-sub-text" id="kpi-created-sub">…</div></div>
+        <div class="kpi loading" style="--kpi-color:var(--green)"><div class="kpi-icon">✅</div><div class="kpi-num" id="kpi-closed">—</div><div class="kpi-label-text">Tickets Closed</div><div class="kpi-sub-text" id="kpi-closed-sub">…</div></div>
+        <div class="kpi loading" style="--kpi-color:var(--amber)"><div class="kpi-icon">📊</div><div class="kpi-num" id="kpi-net">—</div><div class="kpi-label-text">Net Change</div><div class="kpi-sub-text" id="kpi-net-sub">…</div></div>
+        <div class="kpi loading" style="--kpi-color:var(--accent2)"><div class="kpi-icon">📈</div><div class="kpi-num" id="kpi-rate">—</div><div class="kpi-label-text">Close Rate</div><div class="kpi-sub-text" id="kpi-rate-sub">…</div></div>
+        <div class="kpi loading" style="--kpi-color:var(--purple)"><div class="kpi-icon">👥</div><div class="kpi-num" id="kpi-users">—</div><div class="kpi-label-text">Active Techs</div><div class="kpi-sub-text" id="kpi-users-sub">…</div></div>
+        <div class="kpi loading" style="--kpi-color:var(--amber)"><div class="kpi-icon">🗂</div><div class="kpi-num" id="kpi-boards">—</div><div class="kpi-label-text">Active Boards</div><div class="kpi-sub-text" id="kpi-boards-sub">…</div></div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-label">Trends</div>
+      <div class="three-col">
+        <div class="chart-panel">
+          <div class="chart-panel-header"><div class="chart-panel-title">Daily Volume</div><span class="chart-panel-badge" id="trend-badge">—</span></div>
+          <div class="chart-wrap tall"><canvas id="trendChart"></canvas></div>
+        </div>
+        <div class="chart-panel">
+          <div class="chart-panel-header"><div class="chart-panel-title">By Board</div><span class="chart-panel-badge">Distribution</span></div>
+          <div style="display:flex;align-items:center;justify-content:center;height:220px"><canvas id="boardDonut" style="max-height:220px;max-width:220px"></canvas></div>
+        </div>
+        <div class="chart-panel">
+          <div class="chart-panel-header"><div class="chart-panel-title">Created vs Closed</div><span class="chart-panel-badge">Ratio</span></div>
+          <div style="display:flex;align-items:center;justify-content:center;height:220px"><canvas id="ratioChart" style="max-height:220px;max-width:220px"></canvas></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-label">Performance</div>
+      <div class="two-col">
+        <div class="leaderboard">
+          <div class="lb-header">
+            <div class="lb-title">Technician Leaderboard</div>
+            <div class="lb-tabs">
+              <button class="lb-tab active" data-sort="total">Total</button>
+              <button class="lb-tab" data-sort="closed">Closed</button>
+              <button class="lb-tab" data-sort="created">Created</button>
+            </div>
+          </div>
+          <div id="lb-body"><div class="loading-state"><div class="spin"></div>Loading…</div></div>
+        </div>
+        <div class="chart-panel">
+          <div class="chart-panel-header"><div class="chart-panel-title">Board Breakdown</div><span class="chart-panel-badge" id="board-count-badge">—</span></div>
+          <div style="overflow-x:auto">
+            <table class="data-table">
+              <thead><tr><th>Board</th><th class="r">Created</th><th class="r">Closed</th><th class="r">Net</th></tr></thead>
+              <tbody id="board-tbody"><tr><td colspan="4"><div class="loading-state"><div class="spin"></div>Loading…</div></td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-label">Technician Activity</div>
+      <div class="chart-panel">
+        <div class="chart-panel-header"><div class="chart-panel-title">Per-Technician Volume</div><span class="chart-panel-badge">Created vs Closed</span></div>
+        <div class="chart-wrap tall"><canvas id="userBarChart"></canvas></div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-label">Cumulative View</div>
+      <div class="chart-panel">
+        <div class="chart-panel-header"><div class="chart-panel-title">Running Totals Over Period</div><span class="chart-panel-badge" id="cumul-badge">—</span></div>
+        <div class="chart-wrap tall"><canvas id="cumulChart"></canvas></div>
+      </div>
+    </div>
+  </div>
+  <div class="page" id="page-customers">
+
+    <div class="section">
+      <div class="section-label">Customer Overview</div>
+      <div class="kpi-row">
+        <div class="kpi loading" style="--kpi-color:var(--orange)"><div class="kpi-icon">🏢</div><div class="kpi-num" id="ckpi-companies">—</div><div class="kpi-label-text">Companies</div><div class="kpi-sub-text" id="ckpi-companies-sub">…</div></div>
+        <div class="kpi loading" style="--kpi-color:var(--blue)"><div class="kpi-icon">📥</div><div class="kpi-num" id="ckpi-created">—</div><div class="kpi-label-text">Tickets Created</div><div class="kpi-sub-text" id="ckpi-created-sub">…</div></div>
+        <div class="kpi loading" style="--kpi-color:var(--green)"><div class="kpi-icon">✅</div><div class="kpi-num" id="ckpi-closed">—</div><div class="kpi-label-text">Tickets Closed</div><div class="kpi-sub-text" id="ckpi-closed-sub">…</div></div>
+        <div class="kpi loading" style="--kpi-color:var(--accent2)"><div class="kpi-icon">📈</div><div class="kpi-num" id="ckpi-rate">—</div><div class="kpi-label-text">Avg Close Rate</div><div class="kpi-sub-text" id="ckpi-rate-sub">…</div></div>
+        <div class="kpi loading" style="--kpi-color:var(--red)"><div class="kpi-icon">🔥</div><div class="kpi-num" id="ckpi-busiest">—</div><div class="kpi-label-text">Busiest Company</div><div class="kpi-sub-text" id="ckpi-busiest-sub">…</div></div>
+        <div class="kpi loading" style="--kpi-color:var(--amber)"><div class="kpi-icon">⚠️</div><div class="kpi-num" id="ckpi-unresolved">—</div><div class="kpi-label-text">Net Change</div><div class="kpi-sub-text" id="ckpi-unresolved-sub">…</div></div>
+        <div class="kpi loading" style="--kpi-color:var(--red)"><div class="kpi-icon">🚨</div><div class="kpi-num" id="ckpi-open">—</div><div class="kpi-label-text">Total Open Now</div><div class="kpi-sub-text" id="ckpi-open-sub">…</div></div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-label">Company Volume</div>
+      <div class="two-col">
+        <div class="chart-panel">
+          <div class="chart-panel-header"><div class="chart-panel-title">Top Companies by Tickets</div><span class="chart-panel-badge">Created vs Closed</span></div>
+          <div class="chart-wrap tall"><canvas id="companyBarChart"></canvas></div>
+        </div>
+        <div class="chart-panel">
+          <div class="chart-panel-header"><div class="chart-panel-title">Share of Total Volume</div><span class="chart-panel-badge">Distribution</span></div>
+          <div style="display:flex;align-items:center;justify-content:center;height:280px"><canvas id="companyDonut" style="max-height:280px;max-width:280px"></canvas></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-label">Company Rankings</div>
+      <div class="two-col">
+        <div class="leaderboard" id="company-leaderboard">
+          <div class="lb-header">
+            <div class="lb-title">Company Leaderboard</div>
+            <div class="lb-tabs">
+              <button class="lb-tab clb-tab active" data-sort="total">Total</button>
+              <button class="lb-tab clb-tab" data-sort="open">Open</button>
+              <button class="lb-tab clb-tab" data-sort="created">Created</button>
+              <button class="lb-tab clb-tab" data-sort="closed">Closed</button>
+              <button class="lb-tab clb-tab" data-sort="net">Net</button>
+            </div>
+          </div>
+          <div id="clb-body"><div class="loading-state"><div class="spin"></div>Loading…</div></div>
+        </div>
+        <div class="chart-panel">
+          <div class="chart-panel-header"><div class="chart-panel-title">Close Rate by Company</div><span class="chart-panel-badge">Top 10</span></div>
+          <div class="chart-wrap tall"><canvas id="closeRateChart"></canvas></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-label">All Companies</div>
+      <div class="chart-panel">
+        <div class="chart-panel-header">
+          <div class="chart-panel-title">Company Directory</div>
+          <span class="chart-panel-badge" id="company-dir-badge">—</span>
+        </div>
+        <div class="search-bar"><span class="search-icon">🔍</span><input type="text" id="company-search" placeholder="Search companies…"></div>
+        <div style="overflow-x:auto">
+          <table class="data-table">
+            <thead><tr><th>Company</th><th class="r">Open Now</th><th class="r">Created</th><th class="r">Closed</th><th class="r">Net</th><th class="r">Close Rate</th><th class="r">Contacts</th></tr></thead>
+            <tbody id="company-tbody"><tr><td colspan="6"><div class="loading-state"><div class="spin"></div>Loading…</div></td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-label">Live Queue</div>
+      <div class="two-col">
+        <div class="chart-panel">
+          <div class="chart-panel-header"><div class="chart-panel-title">Open Tickets by Company</div><span class="chart-panel-badge" id="open-count-badge">—</span></div>
+          <div class="chart-wrap tall"><canvas id="openTicketsChart"></canvas></div>
+        </div>
+        <div class="chart-panel">
+          <div class="chart-panel-header"><div class="chart-panel-title">Open vs Closed (Period) — Top 10</div><span class="chart-panel-badge">Comparison</span></div>
+          <div class="chart-wrap tall"><canvas id="openVsClosedChart"></canvas></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-label">Daily Trend by Top Companies</div>
+      <div class="chart-panel">
+        <div class="chart-panel-header"><div class="chart-panel-title">Top 5 Companies — Daily Created</div><span class="chart-panel-badge" id="company-trend-badge">—</span></div>
+        <div class="chart-wrap tall"><canvas id="companyTrendChart"></canvas></div>
+      </div>
+    </div>
+
+  </div>
+  </div>
+
+<div class="modal-overlay" id="tech-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <div><div class="modal-title" id="tech-modal-name">—</div><div class="modal-subtitle" id="tech-modal-sub">—</div></div>
+      <button class="modal-close" onclick="document.getElementById('tech-modal').classList.remove('open')">✕</button>
+    </div>
+    <div class="modal-body" id="tech-modal-body"></div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="company-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <div><div class="modal-title" id="company-modal-name">—</div><div class="modal-subtitle" id="company-modal-sub">—</div></div>
+      <button class="modal-close" onclick="document.getElementById('company-modal').classList.remove('open')">✕</button>
+    </div>
+    <div class="modal-body" id="company-modal-body"></div>
+  </div>
+</div>
+
+<script>
+const DEFAULT_DAYS = parseInt('{{ days_back }}') || 7;
+const REFRESH_INTERVAL = parseInt('{{ refresh_interval }}') || 300;
+
+let currentDays = DEFAULT_DAYS;
+let techData = null;
+let customerData = null;
+let techCharts = {};
+let customerCharts = {};
+let currentPage = 'technicians';
+let allCompanies = [];
+let sortedTechs = [];
+let sortedCompanies = [];
+let refreshTimer = null;
+
+const BLUE='#00A1E4', GREEN='#4cd964', AMBER='#ffcc00', RED='#ff3b30', PURPLE='#b06ef5', ORANGE='#f5934b';
+const CHART_COLORS = [BLUE, GREEN, AMBER, RED, PURPLE, ORANGE, '#38b6e8', '#c5f542', '#f542a7', '#42f5e0'];
+const GRID = 'rgba(255,255,255,0.05)', TICK = '#888888';
+function baseScales() {
+  return {
+    x: { ticks:{color:TICK, font:{family:'Consolas',size:11}}, grid:{color:GRID} },
+    y: { ticks:{color:TICK, font:{family:'Consolas',size:11}}, grid:{color:GRID}, beginAtZero:true }
+  };
+}
+function destroyCharts(obj) { Object.values(obj).forEach(c=>{try{c.destroy()}catch(e){}}); }
+
+// ── PAGE NAV ──
+document.querySelectorAll('.page-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.page-btn').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    currentPage = btn.dataset.page;
+    document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+    document.getElementById('page-' + currentPage).classList.add('active');
+    if (currentPage === 'customers' && !customerData) loadCustomers();
+  });
+});
+
+// ── DAYS ──
+document.querySelectorAll('.days-btn').forEach(btn => {
+  if (parseInt(btn.dataset.days) === DEFAULT_DAYS) btn.classList.add('active');
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.days-btn').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    currentDays = parseInt(btn.dataset.days);
+    techData = null; customerData = null;
+    loadTechs();
+    if (currentPage === 'customers') loadCustomers();
+  });
+});
+
+// ── LEADERBOARD SORT (TECH) ──
+document.querySelectorAll('.lb-tab:not(.clb-tab)').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.lb-tab:not(.clb-tab)').forEach(t=>t.classList.remove('active'));
+    tab.classList.add('active');
+    if (techData) renderTechLeaderboard(techData.users, tab.dataset.sort);
+  });
+});
+
+// ── LEADERBOARD SORT (COMPANY) ──
+document.querySelectorAll('.clb-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.clb-tab').forEach(t=>t.classList.remove('active'));
+    tab.classList.add('active');
+    if (customerData) renderCompanyLeaderboard(customerData.companies, tab.dataset.sort);
+  });
+});
+
+// ── COMPANY SEARCH ──
+document.getElementById('company-search').addEventListener('input', e => {
+  const q = e.target.value.toLowerCase();
+  const filtered = allCompanies.filter(c => c.name.toLowerCase().includes(q));
+  renderCompanyTable(filtered);
+});
+
+// ── MODAL CLOSE ON OVERLAY ──
+['tech-modal','company-modal'].forEach(id => {
+  document.getElementById(id).addEventListener('click', e => {
+    if (e.target === document.getElementById(id)) document.getElementById(id).classList.remove('open');
+  });
+});
+
+// ────────────────────────────────────
+//  TECHNICIAN PAGE
+// ────────────────────────────────────
+async function loadTechs() {
+  document.getElementById('status-text').textContent = 'Loading…';
+  try {
+    const res = await fetch(`/api/ticket-stats?days=${currentDays}`);
+    const data = await res.json();
+    if (data.error) { document.getElementById('status-text').textContent = 'Error'; return; }
+    techData = data;
+    renderTechs(data);
+    const now = new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    document.getElementById('status-text').textContent = now;
+  } catch(e) { document.getElementById('status-text').textContent = 'Failed'; }
+}
+
+function renderTechs(data) {
+  destroyCharts(techCharts); techCharts = {};
+  const { totals, users, daily, boards } = data;
+  const net = totals.created - totals.closed;
+  const rate = totals.created > 0 ? ((totals.closed/totals.created)*100).toFixed(1) : 0;
+
+  // KPIs
+  const setKpi = (id, val, color) => { const el = document.getElementById(id); el.textContent = val; if(color) el.style.color = color; };
+  setKpi('kpi-created', totals.created);
+  setKpi('kpi-closed', totals.closed);
+  setKpi('kpi-net', net >= 0 ? `+${net}` : `${net}`, net > 0 ? RED : net < 0 ? GREEN : '#888888');
+  setKpi('kpi-rate', `${rate}%`, parseFloat(rate) >= 100 ? GREEN : parseFloat(rate) >= 70 ? AMBER : RED);
+  setKpi('kpi-users', users.length);
+  setKpi('kpi-boards', (boards||[]).length);
+  const pd = v => currentDays > 0 ? (v/currentDays).toFixed(1) : 0;
+  document.getElementById('kpi-created-sub').textContent = `${pd(totals.created)}/day avg`;
+  document.getElementById('kpi-closed-sub').textContent = `${pd(totals.closed)}/day avg`;
+  document.getElementById('kpi-net-sub').textContent = net > 0 ? 'Queue growing' : net < 0 ? 'Queue shrinking' : 'In balance';
+  document.getElementById('kpi-rate-sub').textContent = parseFloat(rate) >= 100 ? 'Keeping up' : 'Backlog growing';
+  document.getElementById('kpi-users-sub').textContent = `In last ${currentDays} days`;
+  document.getElementById('kpi-boards-sub').textContent = 'With activity';
+  document.querySelectorAll('#page-technicians .kpi').forEach(k=>k.classList.remove('loading'));
+
+  // Trend badge
+  const busiest = daily.reduce((a,b)=>(a.created+a.closed>b.created+b.closed?a:b), daily[0]||{});
+  document.getElementById('trend-badge').textContent = busiest.date ? `Busiest: ${busiest.date}` : `Last ${currentDays} days`;
+
+  techCharts.trend = new Chart(document.getElementById('trendChart'), { type:'bar', data:{ labels:daily.map(d=>d.date), datasets:[ {label:'Created',data:daily.map(d=>d.created),backgroundColor:'rgba(0,161,228,0.5)',borderColor:BLUE,borderWidth:1,borderRadius:3}, {label:'Closed',data:daily.map(d=>d.closed),backgroundColor:'rgba(76,217,100,0.5)',borderColor:GREEN,borderWidth:1,borderRadius:3} ] }, options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{labels:{color:TICK,font:{family:'Consolas',size:11}}}}, scales:baseScales() } });
+
+  const topBs = (boards||[]).slice(0,8);
+  techCharts.donut = new Chart(document.getElementById('boardDonut'), { type:'doughnut', data:{ labels:topBs.map(b=>b.name), datasets:[{data:topBs.map(b=>b.created+b.closed), backgroundColor:CHART_COLORS, borderColor:'#0a0a0a', borderWidth:2, hoverOffset:6}] }, options:{ responsive:true, maintainAspectRatio:false, cutout:'68%', plugins:{legend:{position:'bottom',labels:{color:TICK,font:{family:'Consolas',size:10},boxWidth:10,padding:8}}} } });
+
+  techCharts.ratio = new Chart(document.getElementById('ratioChart'), { type:'doughnut', data:{ labels:['Closed','Still Open'], datasets:[{data:[totals.closed, Math.max(0,totals.created-totals.closed)], backgroundColor:[GREEN,RED], borderColor:'#0a0a0a', borderWidth:2, hoverOffset:6}] }, options:{ responsive:true, maintainAspectRatio:false, cutout:'68%', plugins:{ legend:{position:'bottom',labels:{color:TICK,font:{family:'Consolas',size:10},boxWidth:10,padding:8}}, tooltip:{callbacks:{label:ctx=>` ${ctx.raw} (${totals.created>0?((ctx.raw/totals.created)*100).toFixed(1):0}%)`}} } } });
+
+  renderTechLeaderboard(users, 'total');
+
+  // Board table
+  document.getElementById('board-count-badge').textContent = `${(boards||[]).length} boards`;
+  const bHtml = [...(boards||[])].sort((a,b)=>(b.created+b.closed)-(a.created+a.closed)).map(b=>{
+    const n=b.created-b.closed;
+    const nb = n>0?`<span class="badge-n-pos">+${n}</span>`:n<0?`<span class="badge-n-neg">${n}</span>`:`<span class="badge-n-zero">0</span>`;
+    return `<tr><td>${b.name}</td><td class="r"><span class="badge-c">${b.created}</span></td><td class="r"><span class="badge-x">${b.closed}</span></td><td class="r">${nb}</td></tr>`;
+  }).join('');
+  document.getElementById('board-tbody').innerHTML = bHtml || '<tr><td colspan="4" style="color:var(--text-dim);text-align:center;padding:20px">No board data</td></tr>';
+
+  // User bar chart
+  const top10 = users.slice(0,10);
+  techCharts.userBar = new Chart(document.getElementById('userBarChart'), { type:'bar', data:{ labels:top10.map(u=>u.name.split(' ')[0]), datasets:[ {label:'Created',data:top10.map(u=>u.created),backgroundColor:'rgba(0,161,228,0.6)',borderColor:BLUE,borderWidth:1,borderRadius:4}, {label:'Closed',data:top10.map(u=>u.closed),backgroundColor:'rgba(76,217,100,0.6)',borderColor:GREEN,borderWidth:1,borderRadius:4} ] }, options:{ responsive:true, maintainAspectRatio:false, indexAxis:top10.length>6?'y':'x', plugins:{legend:{labels:{color:TICK,font:{family:'Consolas',size:11}}}}, scales:baseScales() } });
+
+  // Cumulative
+  let cc=0, cx=0;
+  const cumData = daily.map(d=>{ cc+=d.created; cx+=d.closed; return{date:d.date,created:cc,closed:cx}; });
+  document.getElementById('cumul-badge').textContent = `Final: ${cc} created / ${cx} closed`;
+  techCharts.cumul = new Chart(document.getElementById('cumulChart'), { type:'line', data:{ labels:cumData.map(d=>d.date), datasets:[ {label:'Cumulative Created',data:cumData.map(d=>d.created),borderColor:BLUE,backgroundColor:'rgba(0,161,228,0.08)',fill:true,tension:0.35,pointRadius:3,pointBackgroundColor:BLUE}, {label:'Cumulative Closed',data:cumData.map(d=>d.closed),borderColor:GREEN,backgroundColor:'rgba(76,217,100,0.08)',fill:true,tension:0.35,pointRadius:3,pointBackgroundColor:GREEN} ] }, options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{labels:{color:TICK,font:{family:'Consolas',size:11}}}}, scales:baseScales() } });
+}
+
+function renderTechLeaderboard(users, sortBy) {
+  const sorted = [...users].sort((a,b) => {
+    if(sortBy==='closed') return b.closed-a.closed;
+    if(sortBy==='created') return b.created-a.created;
+    return (b.created+b.closed)-(a.created+a.closed);
+  });
+  sortedTechs = sorted;
+  const maxVal = sorted.length ? (sortBy==='closed'?sorted[0].closed:sortBy==='created'?sorted[0].created:sorted[0].created+sorted[0].closed) : 1;
+  const header = `<div class="lb-row" style="border-bottom:1px solid var(--border2);cursor:default;pointer-events:none"><div></div><div style="font-family:var(--font-mono);font-size:.7rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px">Technician</div><div style="font-family:var(--font-mono);font-size:.7rem;color:var(--blue);text-align:right;text-transform:uppercase;letter-spacing:1px">Created</div><div style="font-family:var(--font-mono);font-size:.7rem;color:var(--green);text-align:right;text-transform:uppercase;letter-spacing:1px">Closed</div><div style="font-family:var(--font-mono);font-size:.7rem;color:var(--text-dim);text-align:right;text-transform:uppercase;letter-spacing:1px">Net</div></div>`;
+  const rows = sorted.map((u,i)=>{
+    const net=u.created-u.closed, nc=net>0?'pos':net<0?'neg':'zero', ns=net>0?`+${net}`:`${net}`;
+    const val=sortBy==='closed'?u.closed:sortBy==='created'?u.created:u.created+u.closed;
+    const pct=maxVal>0?(val/maxVal*100):0;
+    const ri=i===0?'🥇':i===1?'🥈':i===2?'🥉':`${i+1}`;
+    const rc=i===0?'gold':i===1?'silver':i===2?'bronze':'';
+    return `<div class="lb-row" style="cursor:pointer" onclick="openTechModal(${i})">
+      <div class="lb-rank ${rc}">${ri}</div>
+      <div><div class="lb-name">${u.name}</div><div class="lb-bar-wrap"><div class="lb-bar" style="width:${pct}%"></div></div></div>
+      <div class="lb-val created">${u.created}</div>
+      <div class="lb-val closed">${u.closed}</div>
+      <div class="lb-val net ${nc}">${ns}</div>
+    </div>`;
+  }).join('');
+  document.getElementById('lb-body').innerHTML = header + (rows || '<div class="loading-state" style="padding:20px">No data</div>');
+}
+
+function openTechModal(idx) {
+  const u = sortedTechs[idx];
+  if (!u) return;
+  const net = u.created-u.closed, rate = u.created>0?Math.round((u.closed/u.created)*100):0;
+  const nc = net>0?RED:net<0?GREEN:'#888888', ns = net>0?`+${net}`:`${net}`;
+  document.getElementById('tech-modal-name').textContent = u.name;
+  document.getElementById('tech-modal-sub').textContent = `${u.created+u.closed} total actions · ${u.boards.length} board${u.boards.length!==1?'s':''}`;
+  const bRows = u.boards.map(b=>{
+    const br=b.created>0?Math.round((b.closed/b.created)*100):0;
+    return `<div class="progress-row"><div class="progress-label"><span>${b.name}</span><span style="font-family:var(--font-mono);font-size:.75rem;color:var(--text-dim)">${b.created}↑ ${b.closed}↓</span></div><div class="progress-track"><div class="progress-fill" style="width:${Math.max(4,br)}%;background:var(--accent2)"></div></div></div>`;
+  }).join('');
+  document.getElementById('tech-modal-body').innerHTML = `
+    <div class="modal-kpis">
+      <div class="modal-kpi"><div class="modal-kpi-val" style="color:var(--blue)">${u.created}</div><div class="modal-kpi-lbl">Created</div></div>
+      <div class="modal-kpi"><div class="modal-kpi-val" style="color:var(--green)">${u.closed}</div><div class="modal-kpi-lbl">Closed</div></div>
+      <div class="modal-kpi"><div class="modal-kpi-val" style="color:${nc}">${ns}</div><div class="modal-kpi-lbl">Net</div></div>
+      <div class="modal-kpi"><div class="modal-kpi-val" style="color:var(--accent2)">${rate}%</div><div class="modal-kpi-lbl">Close Rate</div></div>
+    </div>
+    ${u.boards.length?`<div class="modal-section-title">Board Breakdown — Close Rate</div>${bRows}`:'<p style="color:var(--text-dim);font-size:.85rem">No board breakdown available.</p>'}`;
+  document.getElementById('tech-modal').classList.add('open');
+}
+
+// ────────────────────────────────────
+//  CUSTOMER PAGE
+// ────────────────────────────────────
+async function loadCustomers() {
+  document.getElementById('status-text').textContent = 'Loading…';
+  try {
+    const res = await fetch(`/api/customer-stats?days=${currentDays}`);
+    const data = await res.json();
+    if (data.error) { document.getElementById('status-text').textContent = 'Error'; return; }
+    customerData = data;
+    renderCustomers(data);
+    const now = new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    document.getElementById('status-text').textContent = now;
+  } catch(e) { document.getElementById('status-text').textContent = 'Failed'; }
+}
+
+function renderCustomers(data) {
+  destroyCharts(customerCharts); customerCharts = {};
+  const { companies, totals, daily } = data;
+  allCompanies = companies;
+
+  const totalNet = totals.created - totals.closed;
+  const avgRate = totals.created > 0 ? ((totals.closed/totals.created)*100).toFixed(1) : 0;
+  const busiest = [...companies].sort((a,b)=>(b.created+b.closed)-(a.created+a.closed))[0];
+
+  // KPIs
+  document.getElementById('ckpi-companies').textContent = companies.length;
+  document.getElementById('ckpi-companies-sub').textContent = `In last ${currentDays} days`;
+  document.getElementById('ckpi-created').textContent = totals.created;
+  document.getElementById('ckpi-created-sub').textContent = `${currentDays>0?(totals.created/currentDays).toFixed(1):0}/day avg`;
+  document.getElementById('ckpi-closed').textContent = totals.closed;
+  document.getElementById('ckpi-closed-sub').textContent = `${currentDays>0?(totals.closed/currentDays).toFixed(1):0}/day avg`;
+  document.getElementById('ckpi-rate').textContent = `${avgRate}%`;
+  document.getElementById('ckpi-rate').style.color = parseFloat(avgRate)>=100?GREEN:parseFloat(avgRate)>=70?AMBER:RED;
+  document.getElementById('ckpi-rate-sub').textContent = 'Across all companies';
+  document.getElementById('ckpi-busiest').textContent = busiest ? busiest.name.split(' ')[0] : '—';
+  document.getElementById('ckpi-busiest-sub').textContent = busiest ? `${busiest.created+busiest.closed} tickets` : '';
+  document.getElementById('ckpi-unresolved').textContent = totalNet >= 0 ? `+${totalNet}` : `${totalNet}`;
+  document.getElementById('ckpi-unresolved').style.color = totalNet > 0 ? RED : totalNet < 0 ? GREEN : '#888888';
+  document.getElementById('ckpi-unresolved-sub').textContent = totalNet > 0 ? 'More opened than closed' : 'On top of queue';
+  const totalOpen = totals.open || 0;
+  document.getElementById('ckpi-open').textContent = totalOpen;
+  document.getElementById('ckpi-open').style.color = totalOpen > 50 ? RED : totalOpen > 20 ? AMBER : GREEN;
+  document.getElementById('ckpi-open-sub').textContent = 'Live unresolved tickets';
+  document.querySelectorAll('#page-customers .kpi').forEach(k=>k.classList.remove('loading'));
+
+  // Top companies bar chart
+  const top12 = [...companies].sort((a,b)=>(b.created+b.closed)-(a.created+a.closed)).slice(0,12);
+  customerCharts.companyBar = new Chart(document.getElementById('companyBarChart'), {
+    type:'bar',
+    data:{ labels:top12.map(c=>c.name.length>18?c.name.slice(0,16)+'…':c.name), datasets:[
+      {label:'Created',data:top12.map(c=>c.created),backgroundColor:'rgba(0,161,228,0.6)',borderColor:BLUE,borderWidth:1,borderRadius:3},
+      {label:'Closed',data:top12.map(c=>c.closed),backgroundColor:'rgba(76,217,100,0.6)',borderColor:GREEN,borderWidth:1,borderRadius:3}
+    ]},
+    options:{ responsive:true, maintainAspectRatio:false, indexAxis:top12.length>6?'y':'x', plugins:{legend:{labels:{color:TICK,font:{family:'Consolas',size:11}}}}, scales:baseScales() }
+  });
+
+  // Company donut
+  const top8 = top12.slice(0,8);
+  const others = companies.slice(8).reduce((s,c)=>s+c.created+c.closed,0);
+  const donutLabels = top8.map(c=>c.name.length>20?c.name.slice(0,18)+'…':c.name);
+  const donutData = top8.map(c=>c.created+c.closed);
+  if (others > 0) { donutLabels.push('Others'); donutData.push(others); }
+  customerCharts.companyDonut = new Chart(document.getElementById('companyDonut'), {
+    type:'doughnut',
+    data:{ labels:donutLabels, datasets:[{data:donutData, backgroundColor:[...CHART_COLORS,'#555'], borderColor:'#0a0a0a', borderWidth:2, hoverOffset:6}] },
+    options:{ responsive:true, maintainAspectRatio:false, cutout:'60%', plugins:{legend:{position:'right',labels:{color:TICK,font:{family:'Consolas',size:10},boxWidth:10,padding:6}}} }
+  });
+
+  // Close rate chart
+  const top10cr = [...companies].filter(c=>c.created>0).sort((a,b)=>(b.closed/b.created)-(a.closed/a.created)).slice(0,10);
+  const crData = top10cr.map(c=>Math.round((c.closed/c.created)*100));
+  customerCharts.closeRate = new Chart(document.getElementById('closeRateChart'), {
+    type:'bar',
+    data:{ labels:top10cr.map(c=>c.name.length>15?c.name.slice(0,13)+'…':c.name), datasets:[{
+      label:'Close Rate %', data:crData,
+      backgroundColor: crData.map(v=>v>=100?'rgba(76,217,100,0.6)':v>=70?'rgba(255,204,0,0.6)':'rgba(255,59,48,0.6)'),
+      borderColor: crData.map(v=>v>=100?GREEN:v>=70?AMBER:RED),
+      borderWidth:1, borderRadius:4
+    }]},
+    options:{ responsive:true, maintainAspectRatio:false, indexAxis:'y',
+      plugins:{ legend:{display:false}, tooltip:{callbacks:{label:ctx=>` ${ctx.raw}%`}} },
+      scales:{ x:{...baseScales().x, max:Math.max(100,...crData)+5, ticks:{...baseScales().x.ticks,callback:v=>`${v}%`}}, y:baseScales().y }
+    }
+  });
+
+  // Open tickets charts
+  const topByOpen = [...companies].filter(c=>(c.open||0)>0).sort((a,b)=>(b.open||0)-(a.open||0)).slice(0,15);
+  document.getElementById('open-count-badge').textContent = `${totals.open||0} total open`;
+  if (topByOpen.length) {
+    customerCharts.openTickets = new Chart(document.getElementById('openTicketsChart'), {
+      type: 'bar',
+      data: {
+        labels: topByOpen.map(c=>c.name.length>18?c.name.slice(0,16)+'…':c.name),
+        datasets: [{
+          label: 'Open Tickets',
+          data: topByOpen.map(c=>c.open||0),
+          backgroundColor: topByOpen.map(c=>(c.open||0)>10?'rgba(255,59,48,0.65)':(c.open||0)>3?'rgba(255,204,0,0.65)':'rgba(76,217,100,0.65)'),
+          borderColor: topByOpen.map(c=>(c.open||0)>10?RED:(c.open||0)>3?AMBER:GREEN),
+          borderWidth: 1, borderRadius: 4
+        }]
+      },
+      options: { responsive:true, maintainAspectRatio:false, indexAxis:'y',
+        plugins:{ legend:{display:false}, tooltip:{callbacks:{label:ctx=>` ${ctx.raw} open`}} },
+        scales: baseScales()
+      }
+    });
+
+    const top10ov = [...companies].sort((a,b)=>(b.created+b.closed)-(a.created+a.closed)).slice(0,10);
+    customerCharts.openVsClosed = new Chart(document.getElementById('openVsClosedChart'), {
+      type: 'bar',
+      data: {
+        labels: top10ov.map(c=>c.name.length>14?c.name.slice(0,12)+'…':c.name),
+        datasets: [
+          { label: 'Open Now', data: top10ov.map(c=>c.open||0), backgroundColor: 'rgba(255,59,48,0.6)', borderColor: RED, borderWidth:1, borderRadius:3 },
+          { label: 'Closed (period)', data: top10ov.map(c=>c.closed), backgroundColor: 'rgba(76,217,100,0.6)', borderColor: GREEN, borderWidth:1, borderRadius:3 }
+        ]
+      },
+      options: { responsive:true, maintainAspectRatio:false,
+        plugins:{ legend:{labels:{color:TICK,font:{family:'Consolas',size:11}}} },
+        scales: baseScales()
+      }
+    });
+  }
+
+  // Company leaderboard
+  renderCompanyLeaderboard(companies, 'total');
+
+  // Company table
+  renderCompanyTable(companies);
+
+  // Company directory badge
+  document.getElementById('company-dir-badge').textContent = `${companies.length} companies`;
+
+  // Trend by top 5 companies
+  const top5 = [...companies].sort((a,b)=>(b.created+b.closed)-(a.created+a.closed)).slice(0,5);
+  document.getElementById('company-trend-badge').textContent = `Top ${top5.length} companies`;
+  customerCharts.companyTrend = new Chart(document.getElementById('companyTrendChart'), {
+    type:'line',
+    data:{
+      labels: daily.map(d=>d.date),
+      datasets: top5.map((c,i)=>({
+        label: c.name.length>20?c.name.slice(0,18)+'…':c.name,
+        data: daily.map(d=>(d.byCompany&&d.byCompany[c.name])||0),
+        borderColor: CHART_COLORS[i],
+        backgroundColor: CHART_COLORS[i]+'22',
+        fill: false, tension:0.35, pointRadius:3, pointBackgroundColor:CHART_COLORS[i]
+      }))
+    },
+    options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{labels:{color:TICK,font:{family:'Consolas',size:11}}}}, scales:baseScales() }
+  });
+}
+
+function renderCompanyLeaderboard(companies, sortBy) {
+  const sorted = [...companies].sort((a,b)=>{
+    if(sortBy==='created') return b.created-a.created;
+    if(sortBy==='closed') return b.closed-a.closed;
+    if(sortBy==='net') return (b.created-b.closed)-(a.created-a.closed);
+    if(sortBy==='open') return (b.open||0)-(a.open||0);
+    return (b.created+b.closed)-(a.created+a.closed);
+  });
+  sortedCompanies = sorted;
+  const maxVal = sorted.length?(sortBy==='created'?sorted[0].created:sortBy==='closed'?sorted[0].closed:sorted[0].created+sorted[0].closed):1;
+  const header = `<div class="lb-row" style="border-bottom:1px solid var(--border2);cursor:default;pointer-events:none;grid-template-columns:28px 1fr 60px 60px 60px 60px"><div></div><div style="font-family:var(--font-mono);font-size:.7rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px">Company</div><div style="font-family:var(--font-mono);font-size:.7rem;color:var(--red);text-align:right;text-transform:uppercase;letter-spacing:1px">Open</div><div style="font-family:var(--font-mono);font-size:.7rem;color:var(--blue);text-align:right;text-transform:uppercase;letter-spacing:1px">Created</div><div style="font-family:var(--font-mono);font-size:.7rem;color:var(--green);text-align:right;text-transform:uppercase;letter-spacing:1px">Closed</div><div style="font-family:var(--font-mono);font-size:.7rem;color:var(--text-dim);text-align:right;text-transform:uppercase;letter-spacing:1px">Net</div></div>`;
+  const rows = sorted.slice(0,20).map((c,i)=>{
+    const net=c.created-c.closed, nc=net>0?'pos':net<0?'neg':'zero', ns=net>0?`+${net}`:`${net}`;
+    const val=sortBy==='created'?c.created:sortBy==='closed'?c.closed:c.created+c.closed;
+    const pct=maxVal>0?(val/maxVal*100):0;
+    const ri=i===0?'🥇':i===1?'🥈':i===2?'🥉':`${i+1}`;
+    const rc=i===0?'gold':i===1?'silver':i===2?'bronze':'';
+    const oc=c.open||0, ocColor=oc>10?RED:oc>3?AMBER:GREEN;
+    return `<div class="lb-row" style="cursor:pointer;grid-template-columns:28px 1fr 60px 60px 60px 60px" onclick="openCompanyModal(${i})">
+      <div class="lb-rank ${rc}">${ri}</div>
+      <div><div class="lb-name">${c.name}</div><div class="lb-bar-wrap"><div class="lb-bar" style="width:${pct}%"></div></div></div>
+      <div class="lb-val" style="color:${ocColor};text-align:right;font-family:var(--font-mono);font-size:.8rem">${oc}</div>
+      <div class="lb-val created">${c.created}</div>
+      <div class="lb-val closed">${c.closed}</div>
+      <div class="lb-val net ${nc}">${ns}</div>
+    </div>`;
+  }).join('');
+  document.getElementById('clb-body').innerHTML = header + (rows || '<div class="loading-state" style="padding:20px">No data</div>');
+}
+
+function renderCompanyTable(companies) {
+  const sorted = [...companies].sort((a,b)=>(b.open||0)-(a.open||0)||(b.created+b.closed)-(a.created+a.closed));
+  const rows = sorted.map((c,i)=>{
+    const net=c.created-c.closed;
+    const nb=net>0?`<span class="badge-n-pos">+${net}</span>`:net<0?`<span class="badge-n-neg">${net}</span>`:`<span class="badge-n-zero">0</span>`;
+    const rate=c.created>0?Math.round((c.closed/c.created)*100):0;
+    const rateColor=rate>=100?GREEN:rate>=70?AMBER:RED;
+    const openCount=c.open||0;
+    const openColor=openCount>10?RED:openCount>3?AMBER:GREEN;
+    return `<tr style="cursor:pointer" onclick="openCompanyModalByName('${c.name.replace(/'/g,"\'")}')">
+      <td><span style="font-weight:600">${c.name}</span></td>
+      <td class="r"><span style="font-family:var(--font-mono);font-size:.85rem;font-weight:700;color:${openColor}">${openCount}</span></td>
+      <td class="r"><span class="badge-c">${c.created}</span></td>
+      <td class="r"><span class="badge-x">${c.closed}</span></td>
+      <td class="r">${nb}</td>
+      <td class="r"><span style="font-family:var(--font-mono);font-size:.8rem;color:${rateColor};font-weight:bold;">${rate}%</span></td>
+      <td class="r"><span style="font-family:var(--font-mono);font-size:.8rem;color:var(--text-dim)">${c.contacts||0}</span></td>
+    </tr>`;
+  }).join('');
+  document.getElementById('company-tbody').innerHTML = rows || '<tr><td colspan="7" style="color:var(--text-dim);text-align:center;padding:20px">No companies found</td></tr>';
+}
+
+function openCompanyModal(idx) {
+  const c = sortedCompanies[idx];
+  if (!c) return;
+  showCompanyModal(c);
+}
+function openCompanyModalByName(name) {
+  const c = allCompanies.find(x=>x.name===name);
+  if (c) showCompanyModal(c);
+}
+
+function showCompanyModal(c) {
+  const net=c.created-c.closed, rate=c.created>0?Math.round((c.closed/c.created)*100):0;
+  const nc=net>0?RED:net<0?GREEN:'#888888', ns=net>0?`+${net}`:`${net}`;
+  const openCount=c.open||0;
+  const openColor=openCount>10?RED:openCount>3?AMBER:GREEN;
+  document.getElementById('company-modal-name').textContent = c.name;
+  document.getElementById('company-modal-sub').textContent = `${openCount} open now · ${c.created+c.closed} activity in period · ${c.contacts||0} contact${(c.contacts||0)!==1?'s':''} active`;
+
+  const techRows = (c.technicians||[]).map(t=>{
+    const tr=t.created>0?Math.round((t.closed/t.created)*100):0;
+    return `<div class="progress-row"><div class="progress-label"><span>${t.name}</span><span style="font-family:var(--font-mono);font-size:.8rem;color:var(--text-dim)">${t.created}↑ ${t.closed}↓</span></div><div class="progress-track"><div class="progress-fill" style="width:${Math.max(4,tr)}%;background:var(--purple)"></div></div></div>`;
+  }).join('');
+
+  const boardRows = (c.boards||[]).map(b=>{
+    const br=b.created>0?Math.round((b.closed/b.created)*100):0;
+    return `<div class="progress-row"><div class="progress-label"><span>${b.name}</span><span style="font-family:var(--font-mono);font-size:.8rem;color:var(--text-dim)">${b.created}↑ ${b.closed}↓</span></div><div class="progress-track"><div class="progress-fill" style="width:${Math.max(4,br)}%;background:var(--accent2)"></div></div></div>`;
+  }).join('');
+
+  document.getElementById('company-modal-body').innerHTML = `
+    <div class="modal-kpis" style="grid-template-columns:repeat(5,1fr)">
+      <div class="modal-kpi" style="border-left: 10px solid ${openColor}"><div class="modal-kpi-val" style="color:${openColor}">${openCount}</div><div class="modal-kpi-lbl">Open Now</div></div>
+      <div class="modal-kpi" style="border-left: 10px solid var(--blue)"><div class="modal-kpi-val" style="color:var(--blue)">${c.created}</div><div class="modal-kpi-lbl">Created</div></div>
+      <div class="modal-kpi" style="border-left: 10px solid var(--green)"><div class="modal-kpi-val" style="color:var(--green)">${c.closed}</div><div class="modal-kpi-lbl">Closed</div></div>
+      <div class="modal-kpi" style="border-left: 10px solid ${nc}"><div class="modal-kpi-val" style="color:${nc}">${ns}</div><div class="modal-kpi-lbl">Net</div></div>
+      <div class="modal-kpi" style="border-left: 10px solid var(--accent2)"><div class="modal-kpi-val" style="color:var(--accent2)">${rate}%</div><div class="modal-kpi-lbl">Close Rate</div></div>
+    </div>
+    ${openCount>0?`<div style="background:rgba(255,59,48,0.06);border:1px solid rgba(255,59,48,0.15);border-radius:8px;padding:10px 14px;margin-bottom:14px;font-family:var(--font-body);font-weight:bold;font-size:.8rem;color:var(--red)">🚨 ${openCount} ticket${openCount!==1?'s':''} currently open and unresolved</div>`:''}
+    ${(c.technicians||[]).length?`<div class="modal-section-title">Assigned Technicians</div>${techRows}`:''}
+    ${(c.boards||[]).length?`<div class="modal-section-title">Boards Active</div>${boardRows}`:''}
+  `;
+  document.getElementById('company-modal').classList.add('open');
+}
+
+// ── CONFIG CHECK ──
+async function checkConfig() {
+  try {
+    const data = await fetch('/api/config-check').then(r=>r.json());
+    if (!data.configured) document.getElementById('config-banner').classList.add('show');
+  } catch(e) {}
+}
+
+// ── AUTO REFRESH ──
+function startAutoRefresh() {
+  clearInterval(refreshTimer);
+  refreshTimer = setInterval(()=>{ loadTechs(); if(currentPage==='customers') loadCustomers(); }, REFRESH_INTERVAL*1000);
+}
+
+checkConfig();
+loadTechs();
+startAutoRefresh();
+</script>
+</body>
+</html>
