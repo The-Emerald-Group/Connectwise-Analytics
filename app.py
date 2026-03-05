@@ -108,7 +108,10 @@ def get_real_name(identifier, fallback_owner, m_map):
 
 @app.route("/")
 def index():
-    return render_template("index.html", refresh_interval=REFRESH_INTERVAL, days_back=DAYS_BACK)
+    # Strip "api-" from the URL for the frontend links to work
+    ui_site = CW_SITE.replace("api-", "", 1) if CW_SITE.startswith("api-") else CW_SITE
+    cw_base_url = f"https://{ui_site}/v4_6_release/services/system_io/Service/fv_sr100_request.rails?companyName={CW_COMPANY}&service_recid="
+    return render_template("index.html", refresh_interval=REFRESH_INTERVAL, days_back=DAYS_BACK, cw_base_url=cw_base_url)
 
 @app.route("/api/ticket-stats")
 def ticket_stats():
@@ -119,7 +122,6 @@ def ticket_stats():
         since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
         m_map = get_members_map()
 
-        # Removed "fields" filter so CW returns the full object including _info
         created_tickets = cw_get("/service/tickets", {
             "conditions": f"dateEntered >= [{since_str}] and parentTicketId = null",
             "orderBy": "dateEntered asc"
@@ -170,7 +172,6 @@ def ticket_stats():
 
         def get_completer(t):
             info = t.get("_info", {})
-            # Fallback chain: closedBy -> updatedBy in _info -> owner
             cb = t.get("closedBy") or info.get("closedBy") or info.get("updatedBy")
             return get_real_name(cb, t.get("owner"), m_map), cb
 
@@ -181,18 +182,30 @@ def ticket_stats():
 
         user_created = defaultdict(list)
         user_completed  = defaultdict(list)
+        user_created_tickets = defaultdict(list)
+        user_completed_tickets = defaultdict(list)
         
         for t in created_tickets:
             user_real, user_raw = get_creator(t)
             user_raw = user_raw or ""
             if user_real.lower() not in CW_IGNORE_USERS and user_raw.lower() not in CW_IGNORE_USERS:
-                user_created[user_real].append(get_board(t))
+                board_name = get_board(t)
+                user_created[user_real].append(board_name)
+                user_created_tickets[user_real].append({
+                    "id": t.get("id"),
+                    "summary": t.get("summary", "No Summary"),
+                })
                 
         for t in completed_tickets:
             user_real, user_raw = get_completer(t)
             user_raw = user_raw or ""
             if user_real.lower() not in CW_IGNORE_USERS and user_raw.lower() not in CW_IGNORE_USERS:
-                user_completed[user_real].append(get_board(t))
+                board_name = get_board(t)
+                user_completed[user_real].append(board_name)
+                user_completed_tickets[user_real].append({
+                    "id": t.get("id"),
+                    "summary": t.get("summary", "No Summary"),
+                })
 
         all_users = set(user_created.keys()) | set(user_completed.keys())
         users_result = []
@@ -202,7 +215,16 @@ def ticket_stats():
             bn = set(cb) | set(xb)
             boards = [{"name": b, "created": cb.count(b), "completed": xb.count(b)} for b in sorted(bn) if b]
             boards.sort(key=lambda x: x["created"]+x["completed"], reverse=True)
-            users_result.append({"name": name, "created": len(cb), "completed": len(xb), "boards": boards})
+            
+            users_result.append({
+                "name": name, 
+                "created": len(cb), 
+                "completed": len(xb), 
+                "boards": boards,
+                "createdTickets": user_created_tickets[name],
+                "completedTickets": user_completed_tickets[name]
+            })
+            
         users_result.sort(key=lambda u: u["created"]+u["completed"], reverse=True)
 
         board_created = defaultdict(int)
@@ -325,14 +347,27 @@ def customer_stats():
         co_created   = defaultdict(int)
         co_completed = defaultdict(int)
         co_contacts  = defaultdict(set)
+        
         co_techs_c   = defaultdict(lambda: defaultdict(int)) 
         co_techs_comp= defaultdict(lambda: defaultdict(int))
         co_boards_c  = defaultdict(lambda: defaultdict(int))
         co_boards_comp= defaultdict(lambda: defaultdict(int))
 
+        # Store full tickets for the modals
+        co_created_tickets = defaultdict(list)
+        co_completed_tickets = defaultdict(list)
+        co_open_tickets = defaultdict(list)
+
         for t in created_tickets:
             co = get_company(t)
             co_created[co] += 1
+            
+            # Save ticket info
+            co_created_tickets[co].append({
+                "id": t.get("id"),
+                "summary": t.get("summary", "No Summary")
+            })
+            
             ct = get_contact(t)
             if ct: co_contacts[co].add(ct)
             user_real, user_raw = get_creator(t)
@@ -345,6 +380,12 @@ def customer_stats():
         for t in completed_tickets:
             co = get_company(t)
             co_completed[co] += 1
+            
+            co_completed_tickets[co].append({
+                "id": t.get("id"),
+                "summary": t.get("summary", "No Summary")
+            })
+            
             ct = get_contact(t)
             if ct: co_contacts[co].add(ct)
             user_real, user_raw = get_completer(t)
@@ -359,6 +400,12 @@ def customer_stats():
         for t in open_tickets:
             co = get_company(t)
             co_open[co] += 1
+            
+            co_open_tickets[co].append({
+                "id": t.get("id"),
+                "summary": t.get("summary", "No Summary")
+            })
+            
             bn = get_board(t)
             if bn: co_open_boards[co][bn] += 1
 
@@ -380,7 +427,10 @@ def customer_stats():
                 "open": co_open.get(co, 0),
                 "contacts": len(co_contacts[co]),
                 "technicians": techs,
-                "boards": boards
+                "boards": boards,
+                "createdTickets": co_created_tickets[co],
+                "completedTickets": co_completed_tickets[co],
+                "openTickets": co_open_tickets[co]
             })
 
         companies_result.sort(key=lambda c: c["created"]+c["completed"], reverse=True)
