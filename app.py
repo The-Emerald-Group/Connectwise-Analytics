@@ -8,10 +8,7 @@ from collections import defaultdict
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- THIS IS THE FIX ---
-# Tell Flask to look in the current directory ('.') instead of a templates folder
 app = Flask(__name__, template_folder=".")
-# -----------------------
 
 CW_SITE        = os.environ.get("CW_SITE", "api-eu.myconnectwise.net")
 CW_COMPANY     = os.environ.get("CW_COMPANY", "")
@@ -22,6 +19,10 @@ HTTPS_PROXY    = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") 
 REFRESH_INTERVAL = int(os.environ.get("CW_REFRESH_INTERVAL", "300"))
 VERIFY_SSL     = os.environ.get("CW_VERIFY_SSL", "true").lower() != "false"
 DAYS_BACK      = int(os.environ.get("CW_DAYS_BACK", "7"))
+
+# --- IGNORE USERS LOGIC ---
+IGNORE_USERS_RAW = os.environ.get("CW_IGNORE_USERS", "")
+CW_IGNORE_USERS = [u.strip().lower() for u in IGNORE_USERS_RAW.split(",") if u.strip()]
 
 def get_session():
     s = requests.Session()
@@ -63,7 +64,6 @@ def cw_get(endpoint, params=None):
 
 @app.route("/")
 def index():
-    # Because of our fix above, this now looks for index.html right next to app.py
     return render_template("index.html", refresh_interval=REFRESH_INTERVAL, days_back=DAYS_BACK)
 
 @app.route("/api/ticket-stats")
@@ -74,15 +74,17 @@ def ticket_stats():
         since = now - timedelta(days=days)
         since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
 
+        # Fetches enteredBy
         created_tickets = cw_get("/service/tickets", {
             "conditions": f"dateEntered >= [{since_str}] and parentTicketId = null",
-            "fields": "id,summary,owner,board,dateEntered",
+            "fields": "id,summary,owner,board,dateEntered,enteredBy",
             "orderBy": "dateEntered asc"
         })
 
+        # Fetches closedBy
         closed_tickets = cw_get("/service/tickets", {
             "conditions": f"closedFlag = true and lastUpdated >= [{since_str}] and parentTicketId = null",
-            "fields": "id,summary,owner,board,lastUpdated,closedDate",
+            "fields": "id,summary,owner,board,lastUpdated,closedDate,closedBy",
             "orderBy": "lastUpdated asc"
         })
 
@@ -108,24 +110,38 @@ def ticket_stats():
             if k and k in daily_buckets:
                 daily_buckets[k]["closed"] += 1
 
-        def get_owner(t):
+        # --- NEW ACTION DOER LOGIC ---
+        def get_creator(t):
+            eb = t.get("enteredBy")
+            if eb: return eb
             o = t.get("owner")
-            if isinstance(o, dict):
-                return o.get("name", "Unassigned")
+            if isinstance(o, dict): return o.get("identifier", o.get("name", "Unassigned"))
+            return o or "Unassigned"
+
+        def get_closer(t):
+            cb = t.get("closedBy")
+            if cb: return cb
+            o = t.get("owner")
+            if isinstance(o, dict): return o.get("identifier", o.get("name", "Unassigned"))
             return o or "Unassigned"
 
         def get_board(t):
             b = t.get("board")
-            if isinstance(b, dict):
-                return b.get("name", "")
+            if isinstance(b, dict): return b.get("name", "")
             return b or ""
 
         user_created = defaultdict(list)
         user_closed  = defaultdict(list)
+        
         for t in created_tickets:
-            user_created[get_owner(t)].append(get_board(t))
+            user = get_creator(t)
+            if user.lower() not in CW_IGNORE_USERS:
+                user_created[user].append(get_board(t))
+                
         for t in closed_tickets:
-            user_closed[get_owner(t)].append(get_board(t))
+            user = get_closer(t)
+            if user.lower() not in CW_IGNORE_USERS:
+                user_closed[user].append(get_board(t))
 
         all_users = set(user_created.keys()) | set(user_closed.keys())
         users_result = []
@@ -172,13 +188,13 @@ def customer_stats():
 
         created_tickets = cw_get("/service/tickets", {
             "conditions": f"dateEntered >= [{since_str}] and parentTicketId = null",
-            "fields": "id,company,contact,owner,board,dateEntered",
+            "fields": "id,company,contact,owner,board,dateEntered,enteredBy",
             "orderBy": "dateEntered asc"
         })
 
         closed_tickets = cw_get("/service/tickets", {
             "conditions": f"closedFlag = true and lastUpdated >= [{since_str}] and parentTicketId = null",
-            "fields": "id,company,contact,owner,board,lastUpdated,closedDate",
+            "fields": "id,company,contact,owner,board,lastUpdated,closedDate,closedBy",
             "orderBy": "lastUpdated asc"
         })
 
@@ -189,26 +205,31 @@ def customer_stats():
 
         def get_company(t):
             c = t.get("company")
-            if isinstance(c, dict):
-                return c.get("name", "Unknown")
+            if isinstance(c, dict): return c.get("name", "Unknown")
             return c or "Unknown"
 
-        def get_owner(t):
+        def get_creator(t):
+            eb = t.get("enteredBy")
+            if eb: return eb
             o = t.get("owner")
-            if isinstance(o, dict):
-                return o.get("name", "Unassigned")
+            if isinstance(o, dict): return o.get("identifier", o.get("name", "Unassigned"))
+            return o or "Unassigned"
+
+        def get_closer(t):
+            cb = t.get("closedBy")
+            if cb: return cb
+            o = t.get("owner")
+            if isinstance(o, dict): return o.get("identifier", o.get("name", "Unassigned"))
             return o or "Unassigned"
 
         def get_board(t):
             b = t.get("board")
-            if isinstance(b, dict):
-                return b.get("name", "")
+            if isinstance(b, dict): return b.get("name", "")
             return b or ""
 
         def get_contact(t):
             c = t.get("contact")
-            if isinstance(c, dict):
-                return c.get("name", "")
+            if isinstance(c, dict): return c.get("name", "")
             return c or ""
 
         def day_key(iso):
@@ -248,7 +269,9 @@ def customer_stats():
             co_created[co] += 1
             ct = get_contact(t)
             if ct: co_contacts[co].add(ct)
-            co_techs_c[co][get_owner(t)] += 1
+            user = get_creator(t)
+            if user.lower() not in CW_IGNORE_USERS:
+                co_techs_c[co][user] += 1
             bn = get_board(t)
             if bn: co_boards_c[co][bn] += 1
 
@@ -257,7 +280,9 @@ def customer_stats():
             co_closed[co] += 1
             ct = get_contact(t)
             if ct: co_contacts[co].add(ct)
-            co_techs_x[co][get_owner(t)] += 1
+            user = get_closer(t)
+            if user.lower() not in CW_IGNORE_USERS:
+                co_techs_x[co][user] += 1
             bn = get_board(t)
             if bn: co_boards_x[co][bn] += 1
 
