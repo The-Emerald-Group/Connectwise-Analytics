@@ -5,7 +5,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copy both files into the root of the container
 COPY app.py .
+COPY index.html .
 
 EXPOSE 5000
 
