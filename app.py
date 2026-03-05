@@ -20,9 +20,12 @@ REFRESH_INTERVAL = int(os.environ.get("CW_REFRESH_INTERVAL", "300"))
 VERIFY_SSL     = os.environ.get("CW_VERIFY_SSL", "true").lower() != "false"
 DAYS_BACK      = int(os.environ.get("CW_DAYS_BACK", "7"))
 
-# --- IGNORE USERS LOGIC ---
 IGNORE_USERS_RAW = os.environ.get("CW_IGNORE_USERS", "")
 CW_IGNORE_USERS = [u.strip().lower() for u in IGNORE_USERS_RAW.split(",") if u.strip()]
+
+# Cache the members list so we don't bombard the API
+MEMBER_MAP_CACHE = {}
+MEMBER_MAP_LAST_FETCH = None
 
 def get_session():
     s = requests.Session()
@@ -62,6 +65,47 @@ def cw_get(endpoint, params=None):
         page += 1
     return all_results
 
+def get_members_map():
+    global MEMBER_MAP_CACHE, MEMBER_MAP_LAST_FETCH
+    now = datetime.now(timezone.utc)
+    
+    # Refresh cache every 1 hour
+    if MEMBER_MAP_LAST_FETCH and (now - MEMBER_MAP_LAST_FETCH).total_seconds() < 3600:
+        return MEMBER_MAP_CACHE
+        
+    try:
+        members = cw_get("/system/members", {"fields": "identifier,firstName,lastName"})
+        m_map = {}
+        for m in members:
+            ident = m.get("identifier", "")
+            if ident:
+                fname = m.get("firstName", "")
+                lname = m.get("lastName", "")
+                full = f"{fname} {lname}".strip()
+                if full:
+                    m_map[ident.lower()] = full
+        MEMBER_MAP_CACHE = m_map
+        MEMBER_MAP_LAST_FETCH = now
+    except Exception as e:
+        print(f"Failed to fetch members dictionary: {e}")
+        
+    return MEMBER_MAP_CACHE
+
+def get_real_name(identifier, fallback_owner, m_map):
+    if identifier:
+        ident_lower = identifier.lower()
+        if ident_lower in m_map:
+            return m_map[ident_lower]
+        return identifier.title()
+    
+    if fallback_owner and isinstance(fallback_owner, dict):
+        ident = fallback_owner.get("identifier", "")
+        if ident and ident.lower() in m_map:
+            return m_map[ident.lower()]
+        return fallback_owner.get("name", "Unassigned")
+    
+    return "Unassigned"
+
 @app.route("/")
 def index():
     return render_template("index.html", refresh_interval=REFRESH_INTERVAL, days_back=DAYS_BACK)
@@ -73,25 +117,25 @@ def ticket_stats():
         now  = datetime.now(timezone.utc)
         since = now - timedelta(days=days)
         since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+        m_map = get_members_map()
 
-        # Fetches enteredBy
         created_tickets = cw_get("/service/tickets", {
             "conditions": f"dateEntered >= [{since_str}] and parentTicketId = null",
             "fields": "id,summary,owner,board,dateEntered,enteredBy",
             "orderBy": "dateEntered asc"
         })
 
-        # Fetches closedBy
-        closed_tickets = cw_get("/service/tickets", {
-            "conditions": f"closedFlag = true and lastUpdated >= [{since_str}] and parentTicketId = null",
-            "fields": "id,summary,owner,board,lastUpdated,closedDate,closedBy",
+        # Fetches Completed/Resolved tickets instead of just Closed
+        completed_tickets = cw_get("/service/tickets", {
+            "conditions": f"(closedFlag = true or status/resolvedFlag = true or status/name = 'Completed') and lastUpdated >= [{since_str}] and parentTicketId = null",
+            "fields": "id,summary,owner,board,lastUpdated,closedDate,closedBy,dateResolved,resolvedBy,status",
             "orderBy": "lastUpdated asc"
         })
 
         daily_buckets = {}
         for i in range(days):
             day = (since + timedelta(days=i)).strftime("%d %b")
-            daily_buckets[day] = {"date": day, "created": 0, "closed": 0}
+            daily_buckets[day] = {"date": day, "created": 0, "completed": 0}
 
         def day_key(iso):
             try:
@@ -104,26 +148,20 @@ def ticket_stats():
             if k and k in daily_buckets:
                 daily_buckets[k]["created"] += 1
 
-        for t in closed_tickets:
-            ts = t.get("closedDate") or t.get("lastUpdated", "")
+        for t in completed_tickets:
+            # Prioritize resolution date over close date
+            ts = t.get("dateResolved") or t.get("closedDate") or t.get("lastUpdated", "")
             k = day_key(ts)
             if k and k in daily_buckets:
-                daily_buckets[k]["closed"] += 1
+                daily_buckets[k]["completed"] += 1
 
-        # --- NEW ACTION DOER LOGIC ---
         def get_creator(t):
             eb = t.get("enteredBy")
-            if eb: return eb
-            o = t.get("owner")
-            if isinstance(o, dict): return o.get("identifier", o.get("name", "Unassigned"))
-            return o or "Unassigned"
+            return get_real_name(eb, t.get("owner"), m_map)
 
-        def get_closer(t):
-            cb = t.get("closedBy")
-            if cb: return cb
-            o = t.get("owner")
-            if isinstance(o, dict): return o.get("identifier", o.get("name", "Unassigned"))
-            return o or "Unassigned"
+        def get_completer(t):
+            cb = t.get("resolvedBy") or t.get("closedBy")
+            return get_real_name(cb, t.get("owner"), m_map)
 
         def get_board(t):
             b = t.get("board")
@@ -131,43 +169,45 @@ def ticket_stats():
             return b or ""
 
         user_created = defaultdict(list)
-        user_closed  = defaultdict(list)
+        user_completed  = defaultdict(list)
         
         for t in created_tickets:
             user = get_creator(t)
-            if user.lower() not in CW_IGNORE_USERS:
+            eb = t.get("enteredBy", "")
+            if user.lower() not in CW_IGNORE_USERS and eb.lower() not in CW_IGNORE_USERS:
                 user_created[user].append(get_board(t))
                 
-        for t in closed_tickets:
-            user = get_closer(t)
-            if user.lower() not in CW_IGNORE_USERS:
-                user_closed[user].append(get_board(t))
+        for t in completed_tickets:
+            user = get_completer(t)
+            cb = t.get("resolvedBy") or t.get("closedBy") or ""
+            if user.lower() not in CW_IGNORE_USERS and cb.lower() not in CW_IGNORE_USERS:
+                user_completed[user].append(get_board(t))
 
-        all_users = set(user_created.keys()) | set(user_closed.keys())
+        all_users = set(user_created.keys()) | set(user_completed.keys())
         users_result = []
         for name in sorted(all_users):
-            cb = user_created[name]; xb = user_closed[name]
+            cb = user_created[name]; xb = user_completed[name]
             bn = set(cb) | set(xb)
-            boards = [{"name": b, "created": cb.count(b), "closed": xb.count(b)} for b in sorted(bn) if b]
-            boards.sort(key=lambda x: x["created"]+x["closed"], reverse=True)
-            users_result.append({"name": name, "created": len(cb), "closed": len(xb), "boards": boards})
-        users_result.sort(key=lambda u: u["created"]+u["closed"], reverse=True)
+            boards = [{"name": b, "created": cb.count(b), "completed": xb.count(b)} for b in sorted(bn) if b]
+            boards.sort(key=lambda x: x["created"]+x["completed"], reverse=True)
+            users_result.append({"name": name, "created": len(cb), "completed": len(xb), "boards": boards})
+        users_result.sort(key=lambda u: u["created"]+u["completed"], reverse=True)
 
         board_created = defaultdict(int)
-        board_closed  = defaultdict(int)
+        board_completed  = defaultdict(int)
         for t in created_tickets:
             bn = get_board(t)
             if bn: board_created[bn] += 1
-        for t in closed_tickets:
+        for t in completed_tickets:
             bn = get_board(t)
-            if bn: board_closed[bn] += 1
+            if bn: board_completed[bn] += 1
 
-        all_board_names = set(board_created.keys()) | set(board_closed.keys())
-        boards_result = [{"name": bn, "created": board_created[bn], "closed": board_closed[bn]} for bn in all_board_names]
-        boards_result.sort(key=lambda b: b["created"]+b["closed"], reverse=True)
+        all_board_names = set(board_created.keys()) | set(board_completed.keys())
+        boards_result = [{"name": bn, "created": board_created[bn], "completed": board_completed[bn]} for bn in all_board_names]
+        boards_result.sort(key=lambda b: b["created"]+b["completed"], reverse=True)
 
         return jsonify({
-            "totals": {"created": len(created_tickets), "closed": len(closed_tickets)},
+            "totals": {"created": len(created_tickets), "completed": len(completed_tickets)},
             "users": users_result,
             "daily": list(daily_buckets.values()),
             "boards": boards_result,
@@ -185,6 +225,7 @@ def customer_stats():
         now  = datetime.now(timezone.utc)
         since = now - timedelta(days=days)
         since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+        m_map = get_members_map()
 
         created_tickets = cw_get("/service/tickets", {
             "conditions": f"dateEntered >= [{since_str}] and parentTicketId = null",
@@ -192,14 +233,15 @@ def customer_stats():
             "orderBy": "dateEntered asc"
         })
 
-        closed_tickets = cw_get("/service/tickets", {
-            "conditions": f"closedFlag = true and lastUpdated >= [{since_str}] and parentTicketId = null",
-            "fields": "id,company,contact,owner,board,lastUpdated,closedDate,closedBy",
+        completed_tickets = cw_get("/service/tickets", {
+            "conditions": f"(closedFlag = true or status/resolvedFlag = true or status/name = 'Completed') and lastUpdated >= [{since_str}] and parentTicketId = null",
+            "fields": "id,company,contact,owner,board,lastUpdated,closedDate,closedBy,dateResolved,resolvedBy,status",
             "orderBy": "lastUpdated asc"
         })
 
+        # Open Tickets EXCLUDING things sitting in "Completed" statuses waiting for billing
         open_tickets = cw_get("/service/tickets", {
-            "conditions": "closedFlag = false and parentTicketId = null",
+            "conditions": "closedFlag = false and status/resolvedFlag = false and status/name != 'Completed' and parentTicketId = null",
             "fields": "id,company,owner,board,priority,dateEntered",
         })
 
@@ -210,17 +252,11 @@ def customer_stats():
 
         def get_creator(t):
             eb = t.get("enteredBy")
-            if eb: return eb
-            o = t.get("owner")
-            if isinstance(o, dict): return o.get("identifier", o.get("name", "Unassigned"))
-            return o or "Unassigned"
+            return get_real_name(eb, t.get("owner"), m_map)
 
-        def get_closer(t):
-            cb = t.get("closedBy")
-            if cb: return cb
-            o = t.get("owner")
-            if isinstance(o, dict): return o.get("identifier", o.get("name", "Unassigned"))
-            return o or "Unassigned"
+        def get_completer(t):
+            cb = t.get("resolvedBy") or t.get("closedBy")
+            return get_real_name(cb, t.get("owner"), m_map)
 
         def get_board(t):
             b = t.get("board")
@@ -241,7 +277,7 @@ def customer_stats():
         daily_buckets = {}
         for i in range(days):
             day = (since + timedelta(days=i)).strftime("%d %b")
-            daily_buckets[day] = {"date": day, "created": 0, "closed": 0, "byCompany": {}}
+            daily_buckets[day] = {"date": day, "created": 0, "completed": 0, "byCompany": {}}
 
         for t in created_tickets:
             k = day_key(t.get("dateEntered", ""))
@@ -250,19 +286,19 @@ def customer_stats():
                 daily_buckets[k]["created"] += 1
                 daily_buckets[k]["byCompany"][co] = daily_buckets[k]["byCompany"].get(co, 0) + 1
 
-        for t in closed_tickets:
-            ts = t.get("closedDate") or t.get("lastUpdated", "")
+        for t in completed_tickets:
+            ts = t.get("dateResolved") or t.get("closedDate") or t.get("lastUpdated", "")
             k = day_key(ts)
             if k and k in daily_buckets:
-                daily_buckets[k]["closed"] += 1
+                daily_buckets[k]["completed"] += 1
 
         co_created   = defaultdict(int)
-        co_closed    = defaultdict(int)
+        co_completed = defaultdict(int)
         co_contacts  = defaultdict(set)
         co_techs_c   = defaultdict(lambda: defaultdict(int)) 
-        co_techs_x   = defaultdict(lambda: defaultdict(int))
+        co_techs_comp= defaultdict(lambda: defaultdict(int))
         co_boards_c  = defaultdict(lambda: defaultdict(int))
-        co_boards_x  = defaultdict(lambda: defaultdict(int))
+        co_boards_comp= defaultdict(lambda: defaultdict(int))
 
         for t in created_tickets:
             co = get_company(t)
@@ -270,21 +306,23 @@ def customer_stats():
             ct = get_contact(t)
             if ct: co_contacts[co].add(ct)
             user = get_creator(t)
-            if user.lower() not in CW_IGNORE_USERS:
+            eb = t.get("enteredBy", "")
+            if user.lower() not in CW_IGNORE_USERS and eb.lower() not in CW_IGNORE_USERS:
                 co_techs_c[co][user] += 1
             bn = get_board(t)
             if bn: co_boards_c[co][bn] += 1
 
-        for t in closed_tickets:
+        for t in completed_tickets:
             co = get_company(t)
-            co_closed[co] += 1
+            co_completed[co] += 1
             ct = get_contact(t)
             if ct: co_contacts[co].add(ct)
-            user = get_closer(t)
-            if user.lower() not in CW_IGNORE_USERS:
-                co_techs_x[co][user] += 1
+            user = get_completer(t)
+            cb = t.get("resolvedBy") or t.get("closedBy") or ""
+            if user.lower() not in CW_IGNORE_USERS and cb.lower() not in CW_IGNORE_USERS:
+                co_techs_comp[co][user] += 1
             bn = get_board(t)
-            if bn: co_boards_x[co][bn] += 1
+            if bn: co_boards_comp[co][bn] += 1
 
         co_open = defaultdict(int)
         co_open_boards = defaultdict(lambda: defaultdict(int))
@@ -294,34 +332,34 @@ def customer_stats():
             bn = get_board(t)
             if bn: co_open_boards[co][bn] += 1
 
-        all_cos = set(co_created.keys()) | set(co_closed.keys()) | set(co_open.keys())
+        all_cos = set(co_created.keys()) | set(co_completed.keys()) | set(co_open.keys())
         companies_result = []
         for co in all_cos:
-            all_techs = set(co_techs_c[co].keys()) | set(co_techs_x[co].keys())
-            techs = [{"name": t, "created": co_techs_c[co].get(t,0), "closed": co_techs_x[co].get(t,0)} for t in all_techs]
-            techs.sort(key=lambda x: x["created"]+x["closed"], reverse=True)
+            all_techs = set(co_techs_c[co].keys()) | set(co_techs_comp[co].keys())
+            techs = [{"name": t, "created": co_techs_c[co].get(t,0), "completed": co_techs_comp[co].get(t,0)} for t in all_techs]
+            techs.sort(key=lambda x: x["created"]+x["completed"], reverse=True)
 
-            all_boards = set(co_boards_c[co].keys()) | set(co_boards_x[co].keys())
-            boards = [{"name": b, "created": co_boards_c[co].get(b,0), "closed": co_boards_x[co].get(b,0)} for b in all_boards]
-            boards.sort(key=lambda x: x["created"]+x["closed"], reverse=True)
+            all_boards = set(co_boards_c[co].keys()) | set(co_boards_comp[co].keys())
+            boards = [{"name": b, "created": co_boards_c[co].get(b,0), "completed": co_boards_comp[co].get(b,0)} for b in all_boards]
+            boards.sort(key=lambda x: x["created"]+x["completed"], reverse=True)
 
             companies_result.append({
                 "name": co,
                 "created": co_created[co],
-                "closed": co_closed[co],
+                "completed": co_completed[co],
                 "open": co_open.get(co, 0),
                 "contacts": len(co_contacts[co]),
                 "technicians": techs,
                 "boards": boards
             })
 
-        companies_result.sort(key=lambda c: c["created"]+c["closed"], reverse=True)
+        companies_result.sort(key=lambda c: c["created"]+c["completed"], reverse=True)
         total_open = len(open_tickets)
 
         return jsonify({
             "totals": {
                 "created": len(created_tickets),
-                "closed": len(closed_tickets),
+                "completed": len(completed_tickets),
                 "open": total_open
             },
             "companies": companies_result,
