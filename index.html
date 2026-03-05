@@ -164,6 +164,20 @@ body { background:var(--bg); color:var(--text); font-family:var(--font-body); fo
 .progress-track { height:6px; background:var(--raised); border-radius:3px; overflow:hidden; }
 .progress-fill { height:100%; border-radius:3px; transition:width .6s ease; }
 
+/* ── TICKETS DROPDOWN ── */
+details { margin-top: 20px; border-top: 1px solid var(--border); padding-top: 15px; cursor: pointer; }
+summary { font-size: 0.75rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px; font-weight: bold; outline: none; }
+.ticket-list { margin-top: 10px; font-size: 0.85rem; max-height: 250px; overflow-y: auto; padding-right: 5px; }
+.ticket-list::-webkit-scrollbar { width: 6px; }
+.ticket-list::-webkit-scrollbar-track { background: rgba(0,0,0,0.2); border-radius: 4px; }
+.ticket-list::-webkit-scrollbar-thumb { background: #444; border-radius: 4px; }
+.ticket-list::-webkit-scrollbar-thumb:hover { background: #666; }
+.ticket-item { display: flex; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border); align-items: baseline; }
+.ticket-item:last-child { border-bottom: none; }
+.ticket-item a { color: var(--accent); text-decoration: none; font-family: var(--font-mono); font-weight: bold; flex-shrink: 0; }
+.ticket-item a:hover { text-decoration: underline; }
+.ticket-summary { color: var(--text-mid); overflow: hidden; text-overflow: ellipsis; }
+
 /* ── LOADING ── */
 .loading-state { display:flex; align-items:center; justify-content:center; gap:10px; padding:50px; color:var(--text-dim); font-size:.9rem; font-family:var(--font-mono); }
 .spin { width:18px; height:18px; border:3px solid var(--border); border-top-color:var(--accent2); border-radius:50%; animation:spin .7s linear infinite; flex-shrink:0; }
@@ -396,6 +410,7 @@ body { background:var(--bg); color:var(--text); font-family:var(--font-body); fo
 <script>
 const DEFAULT_DAYS = parseInt('{{ days_back }}') || 7;
 const REFRESH_INTERVAL = parseInt('{{ refresh_interval }}') || 300;
+const CW_BASE_URL = "{{ cw_base_url }}"; // Built securely by python
 
 let currentDays = DEFAULT_DAYS;
 let techData = null;
@@ -418,6 +433,27 @@ function baseScales() {
   };
 }
 function destroyCharts(obj) { Object.values(obj).forEach(c=>{try{c.destroy()}catch(e){}}); }
+
+// ── RENDER TICKET DROPDOWNS ──
+function renderTicketList(tickets, title) {
+    if (!tickets || tickets.length === 0) return '';
+    const rows = tickets.map(t => `
+        <div class="ticket-item">
+            <a href="${CW_BASE_URL}${t.id}" target="_blank" title="Open in ConnectWise">#${t.id}</a>
+            <span class="ticket-summary" title="${t.summary}">${t.summary}</span>
+        </div>
+    `).join('');
+    
+    return `
+        <details>
+            <summary>${title} (${tickets.length})</summary>
+            <div class="ticket-list">
+                ${rows}
+            </div>
+        </details>
+    `;
+}
+
 
 // ── PAGE NAV ──
 document.querySelectorAll('.page-btn').forEach(btn => {
@@ -579,12 +615,19 @@ function openTechModal(idx) {
   if (!u) return;
   const net = u.created-u.completed, rate = u.created>0?Math.round((u.completed/u.created)*100):0;
   const nc = net>0?RED:net<0?GREEN:'#888888', ns = net>0?`+${net}`:`${net}`;
+  
   document.getElementById('tech-modal-name').textContent = u.name;
   document.getElementById('tech-modal-sub').textContent = `${u.created+u.completed} total actions · ${u.boards.length} board${u.boards.length!==1?'s':''}`;
+  
   const bRows = u.boards.map(b=>{
     const br=b.created>0?Math.round((b.completed/b.created)*100):0;
     return `<div class="progress-row"><div class="progress-label"><span>${b.name}</span><span style="font-family:var(--font-mono);font-size:.75rem;color:var(--text-dim)">${b.created}↑ ${b.completed}↓</span></div><div class="progress-track"><div class="progress-fill" style="width:${Math.max(4,br)}%;background:var(--accent2)"></div></div></div>`;
   }).join('');
+  
+  // Render ticket dropdowns
+  const completedTicketsDropdown = renderTicketList(u.completedTickets, "Tickets Completed");
+  const createdTicketsDropdown = renderTicketList(u.createdTickets, "Tickets Created");
+
   document.getElementById('tech-modal-body').innerHTML = `
     <div class="modal-kpis">
       <div class="modal-kpi"><div class="modal-kpi-val" style="color:var(--blue)">${u.created}</div><div class="modal-kpi-lbl">Created</div></div>
@@ -592,7 +635,12 @@ function openTechModal(idx) {
       <div class="modal-kpi"><div class="modal-kpi-val" style="color:${nc}">${ns}</div><div class="modal-kpi-lbl">Net</div></div>
       <div class="modal-kpi"><div class="modal-kpi-val" style="color:var(--accent2)">${rate}%</div><div class="modal-kpi-lbl">Completion Rate</div></div>
     </div>
-    ${u.boards.length?`<div class="modal-section-title">Board Breakdown — Completion Rate</div>${bRows}`:'<p style="color:var(--text-dim);font-size:.85rem">No board breakdown available.</p>'}`;
+    
+    ${u.boards.length?`<div class="modal-section-title">Board Breakdown — Completion Rate</div>${bRows}`:''}
+    
+    ${completedTicketsDropdown}
+    ${createdTicketsDropdown}
+  `;
   document.getElementById('tech-modal').classList.add('open');
 }
 
@@ -816,6 +864,7 @@ function showCompanyModal(c) {
   const nc=net>0?RED:net<0?GREEN:'#888888', ns=net>0?`+${net}`:`${net}`;
   const openCount=c.open||0;
   const openColor=openCount>10?RED:openCount>3?AMBER:GREEN;
+  
   document.getElementById('company-modal-name').textContent = c.name;
   document.getElementById('company-modal-sub').textContent = `${openCount} open now · ${c.created+c.completed} activity in period · ${c.contacts||0} contact${(c.contacts||0)!==1?'s':''} active`;
 
@@ -829,6 +878,11 @@ function showCompanyModal(c) {
     return `<div class="progress-row"><div class="progress-label"><span>${b.name}</span><span style="font-family:var(--font-mono);font-size:.8rem;color:var(--text-dim)">${b.created}↑ ${b.completed}↓</span></div><div class="progress-track"><div class="progress-fill" style="width:${Math.max(4,br)}%;background:var(--accent2)"></div></div></div>`;
   }).join('');
 
+  // Render ticket dropdowns
+  const openTicketsDropdown = renderTicketList(c.openTickets, "Open Queue Now");
+  const completedTicketsDropdown = renderTicketList(c.completedTickets, "Tickets Completed");
+  const createdTicketsDropdown = renderTicketList(c.createdTickets, "Tickets Created");
+
   document.getElementById('company-modal-body').innerHTML = `
     <div class="modal-kpis" style="grid-template-columns:repeat(5,1fr)">
       <div class="modal-kpi" style="border-left: 10px solid ${openColor}"><div class="modal-kpi-val" style="color:${openColor}">${openCount}</div><div class="modal-kpi-lbl">Open Now</div></div>
@@ -837,9 +891,14 @@ function showCompanyModal(c) {
       <div class="modal-kpi" style="border-left: 10px solid ${nc}"><div class="modal-kpi-val" style="color:${nc}">${ns}</div><div class="modal-kpi-lbl">Net</div></div>
       <div class="modal-kpi" style="border-left: 10px solid var(--accent2)"><div class="modal-kpi-val" style="color:var(--accent2)">${rate}%</div><div class="modal-kpi-lbl">Completion Rate</div></div>
     </div>
+    
     ${openCount>0?`<div style="background:rgba(255,59,48,0.06);border:1px solid rgba(255,59,48,0.15);border-radius:8px;padding:10px 14px;margin-bottom:14px;font-family:var(--font-body);font-weight:bold;font-size:.8rem;color:var(--red)">🚨 ${openCount} ticket${openCount!==1?'s':''} currently open and unresolved</div>`:''}
     ${(c.technicians||[]).length?`<div class="modal-section-title">Assigned Technicians</div>${techRows}`:''}
     ${(c.boards||[]).length?`<div class="modal-section-title">Boards Active</div>${boardRows}`:''}
+    
+    ${openTicketsDropdown}
+    ${completedTicketsDropdown}
+    ${createdTicketsDropdown}
   `;
   document.getElementById('company-modal').classList.add('open');
 }
