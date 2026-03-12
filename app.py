@@ -3,9 +3,12 @@ import requests
 import base64
 import urllib3
 import traceback
+import sqlite3
+import json
 from flask import Flask, jsonify, render_template, request
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
+from apscheduler.schedulers.background import BackgroundScheduler
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -24,9 +27,27 @@ DAYS_BACK      = int(os.environ.get("CW_DAYS_BACK", "7"))
 IGNORE_USERS_RAW = os.environ.get("CW_IGNORE_USERS", "")
 CW_IGNORE_USERS = [u.strip().lower() for u in IGNORE_USERS_RAW.split(",") if u.strip()]
 
-# Cache the members list so we don't bombard the API
+# ── DATABASE & BACKGROUND SYNC SETUP ──
+DB_PATH = "data/cw_pulse.db"
 MEMBER_MAP_CACHE = {}
 MEMBER_MAP_LAST_FETCH = None
+
+os.makedirs("data", exist_ok=True)
+
+def init_db():
+    """Initialize the SQLite database schema."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS tickets (
+            id INTEGER PRIMARY KEY,
+            lastUpdated TEXT,
+            dateEntered TEXT,
+            raw_data TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
 def get_session():
     s = requests.Session()
@@ -65,6 +86,56 @@ def cw_get(endpoint, params=None):
             break
         page += 1
     return all_results
+
+def sync_tickets():
+    """Background task to sync modified tickets from ConnectWise to SQLite."""
+    print("🔄 Starting background ticket sync...")
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT MAX(lastUpdated) FROM tickets")
+        last_updated = cursor.fetchone()[0]
+
+        if not last_updated:
+            since = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            conditions = f"lastUpdated >= [{since}] and parentTicketId = null"
+        else:
+            conditions = f"lastUpdated > [{last_updated}] and parentTicketId = null"
+
+        updated_tickets = cw_get("/service/tickets", {"conditions": conditions})
+
+        for t in updated_tickets:
+            info = t.get("_info", {})
+            t_last_updated = info.get("lastUpdated") or t.get("lastUpdated")
+            t_date_entered = t.get("dateEntered") or info.get("dateEntered")
+            
+            cursor.execute('''
+                INSERT OR REPLACE INTO tickets (id, lastUpdated, dateEntered, raw_data)
+                VALUES (?, ?, ?, ?)
+            ''', (t.get("id"), t_last_updated, t_date_entered, json.dumps(t)))
+
+        conn.commit()
+        conn.close()
+        print(f"✅ Sync complete. Inserted/Updated {len(updated_tickets)} tickets.")
+    except Exception as e:
+        print(f"❌ Error syncing tickets: {e}")
+        traceback.print_exc()
+
+def get_db_tickets(conditions_func):
+    """Retrieve tickets from the local SQLite DB based on a python filter function."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT raw_data FROM tickets")
+    
+    results = []
+    for row in cursor.fetchall():
+        ticket = json.loads(row[0])
+        if conditions_func(ticket):
+            results.append(ticket)
+            
+    conn.close()
+    return results
 
 def get_members_map():
     global MEMBER_MAP_CACHE, MEMBER_MAP_LAST_FETCH
@@ -106,9 +177,17 @@ def get_real_name(identifier, fallback_owner, m_map):
     
     return "Unassigned"
 
+# Boot Sequence: Setup DB and Start Scheduler
+init_db()
+scheduler = BackgroundScheduler()
+scheduler.add_job(func=sync_tickets, trigger="interval", seconds=REFRESH_INTERVAL)
+scheduler.start()
+sync_tickets()
+
+# ── ROUTES ──
+
 @app.route("/")
 def index():
-    # Strip "api-" from the URL for the frontend links to work
     ui_site = CW_SITE.replace("api-", "", 1) if CW_SITE.startswith("api-") else CW_SITE
     cw_base_url = f"https://{ui_site}/v4_6_release/services/system_io/Service/fv_sr100_request.rails?companyName={CW_COMPANY}&service_recid="
     return render_template("index.html", refresh_interval=REFRESH_INTERVAL, days_back=DAYS_BACK, cw_base_url=cw_base_url)
@@ -122,15 +201,17 @@ def ticket_stats():
         since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
         m_map = get_members_map()
 
-        created_tickets = cw_get("/service/tickets", {
-            "conditions": f"dateEntered >= [{since_str}] and parentTicketId = null",
-            "orderBy": "dateEntered asc"
-        })
+        # Database Filters
+        def is_created_recently(t):
+            dt = t.get("dateEntered") or t.get("_info", {}).get("dateEntered")
+            return dt and dt >= since_str
 
-        recently_updated = cw_get("/service/tickets", {
-            "conditions": f"lastUpdated >= [{since_str}] and parentTicketId = null",
-            "orderBy": "lastUpdated asc"
-        })
+        def is_updated_recently(t):
+            dt = t.get("lastUpdated") or t.get("_info", {}).get("lastUpdated")
+            return dt and dt >= since_str
+
+        created_tickets = get_db_tickets(is_created_recently)
+        recently_updated = get_db_tickets(is_updated_recently)
 
         completed_tickets = []
         for t in recently_updated:
@@ -263,15 +344,25 @@ def customer_stats():
         since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
         m_map = get_members_map()
 
-        created_tickets = cw_get("/service/tickets", {
-            "conditions": f"dateEntered >= [{since_str}] and parentTicketId = null",
-            "orderBy": "dateEntered asc"
-        })
+        # Database Filters
+        def is_created_recently(t):
+            dt = t.get("dateEntered") or t.get("_info", {}).get("dateEntered")
+            return dt and dt >= since_str
 
-        recently_updated = cw_get("/service/tickets", {
-            "conditions": f"lastUpdated >= [{since_str}] and parentTicketId = null",
-            "orderBy": "lastUpdated asc"
-        })
+        def is_updated_recently(t):
+            dt = t.get("lastUpdated") or t.get("_info", {}).get("lastUpdated")
+            return dt and dt >= since_str
+            
+        def is_open(t):
+            st = t.get("status", {})
+            st_name = st.get("name", "").lower()
+            return not t.get("closedFlag") and st_name not in ["completed", "resolved"]
+
+        created_tickets = get_db_tickets(is_created_recently)
+        recently_updated = get_db_tickets(is_updated_recently)
+        
+        all_db_tickets = get_db_tickets(lambda t: True)
+        open_tickets = [t for t in all_db_tickets if is_open(t)]
 
         completed_tickets = []
         for t in recently_updated:
@@ -279,17 +370,6 @@ def customer_stats():
             st_name = st.get("name", "").lower()
             if t.get("closedFlag") or st_name in ["completed", "resolved"]:
                 completed_tickets.append(t)
-
-        all_open_raw = cw_get("/service/tickets", {
-            "conditions": "closedFlag = false and parentTicketId = null",
-        })
-
-        open_tickets = []
-        for t in all_open_raw:
-            st = t.get("status", {})
-            st_name = st.get("name", "").lower()
-            if st_name not in ["completed", "resolved"]:
-                open_tickets.append(t)
 
         def get_company(t):
             c = t.get("company")
@@ -353,7 +433,6 @@ def customer_stats():
         co_boards_c  = defaultdict(lambda: defaultdict(int))
         co_boards_comp= defaultdict(lambda: defaultdict(int))
 
-        # Store full tickets for the modals
         co_created_tickets = defaultdict(list)
         co_completed_tickets = defaultdict(list)
         co_open_tickets = defaultdict(list)
@@ -362,7 +441,6 @@ def customer_stats():
             co = get_company(t)
             co_created[co] += 1
             
-            # Save ticket info
             co_created_tickets[co].append({
                 "id": t.get("id"),
                 "summary": t.get("summary", "No Summary")
