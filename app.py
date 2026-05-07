@@ -27,6 +27,12 @@ DAYS_BACK      = int(os.environ.get("CW_DAYS_BACK", "7"))
 IGNORE_USERS_RAW = os.environ.get("CW_IGNORE_USERS", "")
 CW_IGNORE_USERS = [u.strip().lower() for u in IGNORE_USERS_RAW.split(",") if u.strip()]
 
+# Closed status names — add any extra names your CW instance uses via CW_CLOSED_STATUSES env var
+DEFAULT_CLOSED_STATUSES = {"completed", "resolved", "closed", "done", "fixed", "complete", "closed - resolved", "closed - complete"}
+EXTRA_CLOSED_STATUSES_RAW = os.environ.get("CW_CLOSED_STATUSES", "")
+EXTRA_CLOSED_STATUSES = {s.strip().lower() for s in EXTRA_CLOSED_STATUSES_RAW.split(",") if s.strip()}
+CLOSED_STATUSES = DEFAULT_CLOSED_STATUSES | EXTRA_CLOSED_STATUSES
+
 # ── DATABASE & BACKGROUND SYNC SETUP ──
 DB_PATH = "data/cw_pulse.db"
 MEMBER_MAP_CACHE = {}
@@ -177,6 +183,14 @@ def get_real_name(identifier, fallback_owner, m_map):
     
     return "Unassigned"
 
+def is_closed_ticket(t):
+    """Check if a ticket is closed/completed using closedFlag or status name matching."""
+    if t.get("closedFlag") is True:
+        return True
+    st = t.get("status", {})
+    st_name = st.get("name", "").lower().strip() if isinstance(st, dict) else str(st).lower().strip()
+    return st_name in CLOSED_STATUSES
+
 # Boot Sequence: Setup DB and Start Scheduler
 init_db()
 scheduler = BackgroundScheduler()
@@ -213,12 +227,7 @@ def ticket_stats():
         created_tickets = get_db_tickets(is_created_recently)
         recently_updated = get_db_tickets(is_updated_recently)
 
-        completed_tickets = []
-        for t in recently_updated:
-            st = t.get("status", {})
-            st_name = st.get("name", "").lower()
-            if t.get("closedFlag") or st_name in ["completed", "resolved"]:
-                completed_tickets.append(t)
+        completed_tickets = [t for t in recently_updated if is_closed_ticket(t)]
 
         daily_buckets = {}
         for i in range(days):
@@ -354,9 +363,7 @@ def customer_stats():
             return dt and dt >= since_str
             
         def is_open(t):
-            st = t.get("status", {})
-            st_name = st.get("name", "").lower()
-            return not t.get("closedFlag") and st_name not in ["completed", "resolved"]
+            return not is_closed_ticket(t)
 
         created_tickets = get_db_tickets(is_created_recently)
         recently_updated = get_db_tickets(is_updated_recently)
@@ -364,12 +371,7 @@ def customer_stats():
         all_db_tickets = get_db_tickets(lambda t: True)
         open_tickets = [t for t in all_db_tickets if is_open(t)]
 
-        completed_tickets = []
-        for t in recently_updated:
-            st = t.get("status", {})
-            st_name = st.get("name", "").lower()
-            if t.get("closedFlag") or st_name in ["completed", "resolved"]:
-                completed_tickets.append(t)
+        completed_tickets = [t for t in recently_updated if is_closed_ticket(t)]
 
         def get_company(t):
             c = t.get("company")
@@ -544,6 +546,83 @@ def config_check():
         "proxy": HTTPS_PROXY if HTTPS_PROXY else "none",
         "sslVerify": VERIFY_SSL
     })
+
+@app.route("/api/debug-statuses")
+def debug_statuses():
+    """Debug endpoint — shows all status names and closedFlag values in the local DB.
+    Use this to find out what status names your ConnectWise instance uses so you can
+    add them to CW_CLOSED_STATUSES if needed."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM tickets")
+    total = cursor.fetchone()[0]
+    cursor.execute("SELECT raw_data FROM tickets")
+
+    statuses = {}
+    close_flags = {"true": 0, "false": 0, "missing": 0}
+    matched_closed = 0
+    sample_closed = []
+    sample_open = []
+
+    for row in cursor.fetchall():
+        t = json.loads(row[0])
+        st = t.get("status", {})
+        st_name = st.get("name", "UNKNOWN").strip() if isinstance(st, dict) else str(st).strip()
+        statuses[st_name] = statuses.get(st_name, 0) + 1
+
+        cf = t.get("closedFlag")
+        if cf is True:
+            close_flags["true"] += 1
+        elif cf is False:
+            close_flags["false"] += 1
+        else:
+            close_flags["missing"] += 1
+
+        if is_closed_ticket(t):
+            matched_closed += 1
+            if len(sample_closed) < 3:
+                sample_closed.append({
+                    "id": t.get("id"),
+                    "status": st_name,
+                    "closedFlag": cf,
+                    "summary": t.get("summary", "")[:60]
+                })
+        else:
+            if len(sample_open) < 3:
+                sample_open.append({
+                    "id": t.get("id"),
+                    "status": st_name,
+                    "closedFlag": cf,
+                    "summary": t.get("summary", "")[:60]
+                })
+
+    conn.close()
+
+    return jsonify({
+        "total_tickets_in_db": total,
+        "matched_as_closed": matched_closed,
+        "matched_as_open": total - matched_closed,
+        "close_flags": close_flags,
+        "status_names_and_counts": dict(sorted(statuses.items(), key=lambda x: -x[1])),
+        "closed_statuses_being_matched": sorted(list(CLOSED_STATUSES)),
+        "sample_closed_tickets": sample_closed,
+        "sample_open_tickets": sample_open,
+        "tip": "If your closed tickets are showing as open, add the status name(s) to CW_CLOSED_STATUSES env var (comma-separated)"
+    })
+
+@app.route("/api/sync-now", methods=["POST"])
+def sync_now():
+    """Manually trigger a sync. POST to /api/sync-now"""
+    try:
+        sync_tickets()
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM tickets")
+        total = cursor.fetchone()[0]
+        conn.close()
+        return jsonify({"status": "ok", "total_tickets_in_db": total})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=False)
