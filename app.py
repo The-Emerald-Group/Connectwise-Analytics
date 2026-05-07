@@ -28,7 +28,14 @@ IGNORE_USERS_RAW = os.environ.get("CW_IGNORE_USERS", "")
 CW_IGNORE_USERS = [u.strip().lower() for u in IGNORE_USERS_RAW.split(",") if u.strip()]
 
 # Closed status names — add any extra names your CW instance uses via CW_CLOSED_STATUSES env var
-DEFAULT_CLOSED_STATUSES = {"completed", "resolved", "closed", "done", "fixed", "complete", "closed - resolved", "closed - complete"}
+DEFAULT_CLOSED_STATUSES = {
+    "completed", "resolved", "closed", "done", "fixed", "complete",
+    "closed - resolved", "closed - complete",
+    # CW uses a > prefix for archived/historical closed statuses
+    ">closed", ">closed - no response", ">cancelled",
+    # Archived tickets are also effectively closed
+    "archived",
+}
 EXTRA_CLOSED_STATUSES_RAW = os.environ.get("CW_CLOSED_STATUSES", "")
 EXTRA_CLOSED_STATUSES = {s.strip().lower() for s in EXTRA_CLOSED_STATUSES_RAW.split(",") if s.strip()}
 CLOSED_STATUSES = DEFAULT_CLOSED_STATUSES | EXTRA_CLOSED_STATUSES
