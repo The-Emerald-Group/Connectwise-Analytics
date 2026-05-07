@@ -227,14 +227,21 @@ def ticket_stats():
             dt = t.get("dateEntered") or t.get("_info", {}).get("dateEntered")
             return dt and dt >= since_str
 
-        def is_updated_recently(t):
-            dt = t.get("lastUpdated") or t.get("_info", {}).get("lastUpdated")
-            return dt and dt >= since_str
-
         created_tickets = get_db_tickets(is_created_recently)
-        recently_updated = get_db_tickets(is_updated_recently)
 
-        completed_tickets = [t for t in recently_updated if is_closed_ticket(t)]
+        # Completed = closed ticket where ANY date field falls within the period.
+        def is_completed_in_range(t):
+            if not is_closed_ticket(t):
+                return False
+            info = t.get("_info", {})
+            dates = [
+                t.get("dateEntered"), info.get("dateEntered"),
+                t.get("lastUpdated"), info.get("lastUpdated"),
+                t.get("dateResolved"), t.get("closedDate"),
+            ]
+            return any(d and d >= since_str for d in dates)
+
+        completed_tickets = get_db_tickets(is_completed_in_range)
 
         daily_buckets = {}
         for i in range(days):
@@ -365,20 +372,27 @@ def customer_stats():
             dt = t.get("dateEntered") or t.get("_info", {}).get("dateEntered")
             return dt and dt >= since_str
 
-        def is_updated_recently(t):
-            dt = t.get("lastUpdated") or t.get("_info", {}).get("lastUpdated")
-            return dt and dt >= since_str
-            
         def is_open(t):
             return not is_closed_ticket(t)
 
         created_tickets = get_db_tickets(is_created_recently)
-        recently_updated = get_db_tickets(is_updated_recently)
-        
+
         all_db_tickets = get_db_tickets(lambda t: True)
         open_tickets = [t for t in all_db_tickets if is_open(t)]
 
-        completed_tickets = [t for t in recently_updated if is_closed_ticket(t)]
+        # Completed = closed ticket where ANY date field falls within the period.
+        def is_completed_in_range(t):
+            if not is_closed_ticket(t):
+                return False
+            info = t.get("_info", {})
+            dates = [
+                t.get("dateEntered"), info.get("dateEntered"),
+                t.get("lastUpdated"), info.get("lastUpdated"),
+                t.get("dateResolved"), t.get("closedDate"),
+            ]
+            return any(d and d >= since_str for d in dates)
+
+        completed_tickets = get_db_tickets(is_completed_in_range)
 
         def get_company(t):
             c = t.get("company")
@@ -553,6 +567,100 @@ def config_check():
         "proxy": HTTPS_PROXY if HTTPS_PROXY else "none",
         "sslVerify": VERIFY_SSL
     })
+
+@app.route("/api/debug-range")
+def debug_range():
+    """Debug endpoint to see exactly what tickets are being counted in a date range.
+    Usage: /api/debug-range?days=7
+    Shows counts at each filter stage so you can see where tickets are being lost."""
+    try:
+        days = int(request.args.get("days", DAYS_BACK))
+        now  = datetime.now(timezone.utc)
+        since = now - timedelta(days=days)
+        since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT raw_data FROM tickets")
+        all_tickets = [json.loads(row[0]) for row in cursor.fetchall()]
+        conn.close()
+
+        # Stage 1: created in range
+        created = []
+        for t in all_tickets:
+            dt = t.get("dateEntered") or t.get("_info", {}).get("dateEntered")
+            if dt and dt >= since_str:
+                created.append(t)
+
+        # Stage 2: updated in range
+        updated = []
+        for t in all_tickets:
+            dt = t.get("lastUpdated") or t.get("_info", {}).get("lastUpdated")
+            if dt and dt >= since_str:
+                updated.append(t)
+
+        # Stage 3: closed AND updated in range (current logic)
+        closed_via_updated = [t for t in updated if is_closed_ticket(t)]
+
+        # Stage 4: closed AND created in range
+        closed_via_created = [t for t in created if is_closed_ticket(t)]
+
+        # Stage 5: closed by ANY date field falling in range
+        closed_any = []
+        for t in all_tickets:
+            if not is_closed_ticket(t):
+                continue
+            info = t.get("_info", {})
+            dates = [
+                t.get("dateEntered"), info.get("dateEntered"),
+                t.get("lastUpdated"), info.get("lastUpdated"),
+                t.get("dateResolved"), t.get("closedDate"),
+            ]
+            if any(d and d >= since_str for d in dates):
+                closed_any.append(t)
+
+        # Tickets closed in period but missed by current logic
+        updated_ids = {x.get("id") for x in closed_via_updated}
+        missing_from_updated = [t for t in closed_via_created if t.get("id") not in updated_ids]
+
+        def summarise(tickets, limit=5):
+            out = []
+            for t in tickets[:limit]:
+                info = t.get("_info", {})
+                out.append({
+                    "id": t.get("id"),
+                    "summary": t.get("summary", "")[:50],
+                    "status": (t.get("status") or {}).get("name", "?"),
+                    "closedFlag": t.get("closedFlag"),
+                    "dateEntered": t.get("dateEntered") or info.get("dateEntered"),
+                    "lastUpdated": t.get("lastUpdated") or info.get("lastUpdated"),
+                    "closedBy": t.get("closedBy") or info.get("closedBy"),
+                    "enteredBy": t.get("enteredBy") or info.get("enteredBy"),
+                })
+            return out
+
+        return jsonify({
+            "period": f"last {days} days (since {since_str})",
+            "total_in_db": len(all_tickets),
+            "stage1_created_in_range": len(created),
+            "stage2_updated_in_range": len(updated),
+            "stage3_closed_AND_updated_in_range_CURRENT_LOGIC": len(closed_via_updated),
+            "stage4_closed_AND_created_in_range": len(closed_via_created),
+            "stage5_closed_ANY_date_in_range": len(closed_any),
+            "tickets_in_range_but_missing_from_current_logic": len(missing_from_updated),
+            "sample_missing_tickets": summarise(missing_from_updated),
+            "sample_counted_tickets": summarise(closed_via_updated),
+            "diagnosis": (
+                "Tickets are being lost between stage 4 and stage 3 — "
+                "they were created and closed in the period but lastUpdated is outside the window. "
+                "Fix: use stage5 logic (any date in range)."
+                if len(missing_from_updated) > 0
+                else "No missing tickets detected — counts look correct."
+            )
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+
 
 @app.route("/api/debug-statuses")
 def debug_statuses():
